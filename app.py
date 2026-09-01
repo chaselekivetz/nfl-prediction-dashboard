@@ -22,6 +22,22 @@ from team_data import (
     team_record,
     team_upcoming_games,
 )
+from fun_features import current_week, games_for_week, league_map_frame, upcoming_games_for_week
+from prediction_game import (
+    POSITION_STATS,
+    STAT_LABELS,
+    favorite_team,
+    game_is_open,
+    leaderboard,
+    load_skill_roster,
+    load_weekly_player_stats,
+    save_stat_prediction,
+    save_winner_pick,
+    set_favorite_team,
+    stat_predictions_for_user,
+    user_score,
+    winner_pick_for_user,
+)
 
 MODEL_CACHE_VERSION = "player-impact-role-v2"
 
@@ -357,6 +373,79 @@ def render_team_upcoming(team, schedules, limit=5):
         )
 
 
+def game_of_week(bundle, weekly_games):
+    if weekly_games.empty:
+        return None, None
+
+    best_game = None
+    best_result = None
+    best_distance = None
+
+    for _, game in weekly_games.iterrows():
+        away = clean_text(game.get("away_team"))
+        home = clean_text(game.get("home_team"))
+        if not away or not home or away == home:
+            continue
+        try:
+            result = predict_matchup(bundle, away, home)
+        except Exception:
+            continue
+
+        distance = abs(float(result["home_probability"]) - 0.5)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_game = game
+            best_result = result
+
+    return best_game, best_result
+
+
+def format_game_choice(game):
+    away = clean_text(game.get("away_team"))
+    home = clean_text(game.get("home_team"))
+    return f"{team_name(away)} @ {team_name(home)} — {format_kickoff(game)}"
+
+
+def render_game_of_week(game, result):
+    if game is None or result is None:
+        st.info("Game of the Week will appear when upcoming games are available.")
+        return
+
+    away = clean_text(game.get("away_team"))
+    home = clean_text(game.get("home_team"))
+
+    with st.container(border=True):
+        st.markdown("### ⭐ Game of the Week")
+        st.caption("Selected as the closest matchup in the current model.")
+
+        away_col, middle_col, home_col = st.columns([1, 1.1, 1])
+        with away_col:
+            st.image(team_logo_url(away), width=90)
+            st.markdown(f"**{team_name(away)}**")
+            st.caption(f"Record: {record_label(bundle.team_games, away, current_season)}")
+        with middle_col:
+            st.markdown(
+                f"<div style='text-align:center;font-size:1.25rem;font-weight:700'>"
+                f"{result['away_probability']:.1%} &nbsp; vs &nbsp; {result['home_probability']:.1%}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(format_kickoff(game))
+            st.caption(format_game_location(game))
+        with home_col:
+            st.image(team_logo_url(home), width=90)
+            st.markdown(f"**{team_name(home)}**")
+            st.caption(f"Record: {record_label(bundle.team_games, home, current_season)}")
+
+
+def completed_winner(game):
+    home_score = pd.to_numeric(game.get("home_score"), errors="coerce")
+    away_score = pd.to_numeric(game.get("away_score"), errors="coerce")
+    if pd.isna(home_score) or pd.isna(away_score) or home_score == away_score:
+        return None
+    return clean_text(game.get("home_team")) if home_score > away_score else clean_text(game.get("away_team"))
+
+
 st.set_page_config(
     page_title="NFL Prediction Lab",
     page_icon="🏈",
@@ -383,8 +472,8 @@ st.markdown(
 
 st.title("🏈 NFL Prediction Lab")
 st.caption(
-    "Educational sports-analytics dashboard. It estimates game outcomes from historical "
-    "team performance plus offseason roster and draft changes."
+    "Private NFL analytics, weekly prediction challenges, team pages, schedules, "
+    "player status, and league exploration."
 )
 
 
@@ -401,6 +490,16 @@ def get_model(_schedules, _team_stats, data_signature, model_cache_version):
 @st.cache_data(ttl=900, show_spinner=False)
 def get_injuries(season):
     return load_injury_data(season)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_challenge_roster(season):
+    return load_skill_roster(season)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_challenge_stats(season):
+    return load_weekly_player_stats(season)
 
 
 with st.sidebar:
@@ -446,6 +545,9 @@ try:
             pd.to_numeric(schedules["season"], errors="coerce").dropna().max()
         )
         injuries = get_injuries(current_season)
+        challenge_roster = get_challenge_roster(current_season)
+        challenge_stats = get_challenge_stats(current_season)
+        active_week = current_week(schedules, current_season)
 
 except Exception as exc:
     st.error("The dashboard could not load or train the NFL model.")
@@ -455,17 +557,266 @@ except Exception as exc:
 
 teams = available_teams(bundle)
 
-tab_predict, tab_team, tab_upcoming, tab_offseason, tab_injuries, tab_accuracy, tab_method = st.tabs(
+tab_home, tab_challenge, tab_predict, tab_team, tab_upcoming, tab_offseason, tab_injuries, tab_map, tab_accuracy, tab_method = st.tabs(
     [
+        "Home",
+        "Weekly Challenge",
         "Matchup Predictor",
         "Team Hub",
         "Upcoming Games",
         "Offseason Changes",
         "Player Status",
+        "NFL Map",
         "Model Accuracy",
         "How It Works",
     ]
 )
+
+with tab_home:
+    st.subheader(f"Week {active_week} Home")
+
+    stored_favorite = favorite_team(current_user.email)
+    default_favorite = stored_favorite if stored_favorite in teams else (teams[0] if teams else None)
+
+    top_left, top_right = st.columns([2, 1])
+    with top_left:
+        st.markdown(f"### Welcome, {current_user.name}")
+        st.caption("Your weekly NFL dashboard, prediction challenge, and team explorer.")
+    with top_right:
+        if teams:
+            favorite = st.selectbox(
+                "Favorite team",
+                teams,
+                index=teams.index(default_favorite),
+                format_func=team_label,
+                key="home_favorite_team",
+            )
+            if favorite != stored_favorite:
+                set_favorite_team(current_user.email, current_user.name, favorite)
+
+    weekly_upcoming = upcoming_games_for_week(schedules, current_season, active_week)
+    featured_game, featured_result = game_of_week(bundle, weekly_upcoming)
+    render_game_of_week(featured_game, featured_result)
+
+    home_left, home_right = st.columns(2)
+    with home_left:
+        if teams:
+            st.markdown(f"### Your team: {team_name(favorite)}")
+            st.image(team_logo_url(favorite), width=90)
+            record = team_record(bundle.team_games, favorite, current_season)
+            st.metric("Record", f"{record['wins']}-{record['losses']}")
+            render_injury_summary(injuries, favorite, compact=True)
+            st.markdown("**Next game**")
+            render_team_upcoming(favorite, bundle.schedules, 1)
+
+    with home_right:
+        st.markdown("### Weekly Challenge")
+        my_score = user_score(current_user.email, schedules, challenge_stats)
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Total points", my_score["total"])
+        s2.metric("Winner-pick points", my_score["winner_points"])
+        s3.metric("Stat points", my_score["stat_points"])
+        st.caption(
+            "Correct winner picks earn 10 points. Player-stat challenges earn up to 10 "
+            "points based on accuracy. Nothing is staked or lost."
+        )
+
+        standings = leaderboard(schedules, challenge_stats)
+        if not standings.empty:
+            st.markdown("**Leaderboard**")
+            st.dataframe(standings.head(5), hide_index=True, use_container_width=True)
+        else:
+            st.info("No challenge entries yet. Make the first pick in Weekly Challenge.")
+
+
+with tab_challenge:
+    st.subheader("Weekly Prediction Challenge")
+    st.caption(
+        "Pick game winners and predict player stats to earn points. Entries lock at kickoff. "
+        "This is a points game only—there are no stakes, odds, payouts, or bankrolls."
+    )
+
+    challenge_week = st.selectbox(
+        "Week",
+        list(range(1, 17)),
+        index=max(0, min(15, active_week - 1)),
+        key="challenge_week",
+    )
+
+    week_games = games_for_week(schedules, current_season, challenge_week)
+
+    score = user_score(current_user.email, schedules, challenge_stats)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Your points", score["total"])
+    c2.metric("Settled winner picks", score["settled_winners"])
+    c3.metric("Settled stat challenges", score["settled_stats"])
+
+    st.markdown("### Winner picks")
+    if week_games.empty:
+        st.info(f"No games found for Week {challenge_week}.")
+    else:
+        for _, game in week_games.iterrows():
+            game_id = clean_text(game.get("game_id"))
+            away = clean_text(game.get("away_team"))
+            home = clean_text(game.get("home_team"))
+            if not game_id or not away or not home:
+                continue
+
+            existing = winner_pick_for_user(current_user.email, game_id)
+            winner = completed_winner(game)
+
+            with st.container(border=True):
+                g1, g2, g3 = st.columns([1, 1.3, 1])
+                with g1:
+                    st.image(team_logo_url(away), width=62)
+                    st.markdown(f"**{team_name(away)}**")
+                with g2:
+                    st.markdown(
+                        f"<div style='text-align:center;font-weight:700'>{format_kickoff(game)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(format_game_location(game))
+                with g3:
+                    st.image(team_logo_url(home), width=62)
+                    st.markdown(f"**{team_name(home)}**")
+
+                if winner is not None:
+                    pick_text = team_name(existing) if existing else "No pick"
+                    result_text = "✅ Correct" if existing == winner else ("❌ Incorrect" if existing else "—")
+                    st.caption(
+                        f"Final winner: {team_name(winner)} • Your pick: {pick_text} • {result_text}"
+                    )
+                elif game_is_open(game):
+                    options = [away, home]
+                    default_index = options.index(existing) if existing in options else 0
+                    with st.form(f"winner_pick_{game_id}"):
+                        pick = st.radio(
+                            "Your winner",
+                            options,
+                            index=default_index,
+                            format_func=team_name,
+                            horizontal=True,
+                        )
+                        submitted = st.form_submit_button("Save pick")
+                    if submitted:
+                        save_winner_pick(
+                            current_user.email,
+                            current_user.name,
+                            current_season,
+                            challenge_week,
+                            game_id,
+                            pick,
+                        )
+                        st.success(f"Saved: {team_name(pick)}")
+                else:
+                    st.caption("Picks are locked because this game has started.")
+
+    st.markdown("### Player-stat challenge")
+    open_games = week_games[
+        week_games.apply(game_is_open, axis=1)
+    ].copy() if not week_games.empty else pd.DataFrame()
+
+    if open_games.empty or challenge_roster.empty:
+        st.info("Player-stat challenges will be available when an upcoming game and roster data are available.")
+    else:
+        game_indexes = list(open_games.index)
+        selected_game_index = st.selectbox(
+            "Game",
+            game_indexes,
+            format_func=lambda idx: format_game_choice(open_games.loc[idx]),
+            key="stat_game",
+        )
+        selected_game = open_games.loc[selected_game_index]
+        stat_teams = [
+            clean_text(selected_game.get("away_team")),
+            clean_text(selected_game.get("home_team")),
+        ]
+        stat_team = st.selectbox(
+            "Team",
+            stat_teams,
+            format_func=team_name,
+            key="stat_team",
+        )
+
+        player_pool = challenge_roster[challenge_roster["team"] == stat_team].copy()
+        player_pool = player_pool.sort_values(["position", "full_name"])
+
+        if player_pool.empty:
+            st.info("No eligible QB/RB/WR/TE players were found for this team.")
+        else:
+            player_keys = list(player_pool.index)
+            selected_player_index = st.selectbox(
+                "Player",
+                player_keys,
+                format_func=lambda idx: (
+                    f"{player_pool.loc[idx, 'full_name']} ({player_pool.loc[idx, 'position']})"
+                ),
+                key="stat_player",
+            )
+            player = player_pool.loc[selected_player_index]
+            position = clean_text(player.get("position")).upper()
+            stat_options = POSITION_STATS.get(position, [])
+
+            stat_key = st.selectbox(
+                "Stat to predict",
+                stat_options,
+                format_func=lambda key: STAT_LABELS.get(key, key),
+                key="stat_key",
+            )
+            predicted_value = st.number_input(
+                "Your prediction",
+                min_value=0.0,
+                step=1.0,
+                key="stat_value",
+            )
+
+            if st.button("Save stat prediction", type="primary"):
+                save_stat_prediction(
+                    current_user.email,
+                    current_user.name,
+                    current_season,
+                    challenge_week,
+                    clean_text(selected_game.get("game_id")),
+                    clean_text(player.get("gsis_id")) or clean_text(player.get("full_name")),
+                    clean_text(player.get("full_name")),
+                    stat_key,
+                    predicted_value,
+                )
+                st.success(
+                    f"Saved: {player['full_name']} — {STAT_LABELS.get(stat_key, stat_key)} "
+                    f"{predicted_value:g}"
+                )
+
+    saved_stats = stat_predictions_for_user(
+        current_user.email,
+        current_season,
+        challenge_week,
+    )
+    if not saved_stats.empty:
+        st.markdown("#### Your saved stat predictions")
+        saved_display = saved_stats.copy()
+        saved_display["Stat"] = saved_display["stat_key"].map(
+            lambda key: STAT_LABELS.get(key, key)
+        )
+        saved_display = saved_display.rename(
+            columns={
+                "player_name": "Player",
+                "predicted_value": "Prediction",
+            }
+        )
+        st.dataframe(
+            saved_display[["Player", "Stat", "Prediction"]],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    st.markdown("### Leaderboard")
+    standings = leaderboard(schedules, challenge_stats)
+    if standings.empty:
+        st.info("No leaderboard entries yet.")
+    else:
+        st.dataframe(standings, hide_index=True, use_container_width=True)
+
 
 with tab_predict:
     st.subheader("Compare two teams")
@@ -836,6 +1187,48 @@ with tab_injuries:
     st.image(team_logo_url(injury_team), width=100)
     st.markdown(f"### {team_name(injury_team)}")
     render_injury_summary(injuries, injury_team)
+
+
+with tab_map:
+    st.subheader("NFL League Map")
+    st.caption("Explore all 32 teams by location, then open a quick team view below.")
+
+    map_data = league_map_frame(TEAM_NAMES)
+    st.map(map_data, latitude="lat", longitude="lon", size=55, zoom=3)
+
+    if "league_map_team" not in st.session_state:
+        st.session_state["league_map_team"] = teams[0] if teams else None
+
+    st.markdown("### Team explorer")
+    map_cols = st.columns(4)
+    for idx, map_team in enumerate(teams):
+        with map_cols[idx % 4]:
+            st.image(team_logo_url(map_team), width=58)
+            if st.button(team_name(map_team), key=f"map_team_{map_team}", use_container_width=True):
+                st.session_state["league_map_team"] = map_team
+
+    map_team = st.session_state.get("league_map_team")
+    if map_team:
+        st.divider()
+        detail_logo, detail_main = st.columns([1, 3])
+        with detail_logo:
+            st.image(team_logo_url(map_team), width=130)
+        with detail_main:
+            st.markdown(f"## {team_name(map_team)}")
+            record = team_record(bundle.team_games, map_team, current_season)
+            summary = current_season_summary(bundle.team_games, map_team, current_season)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Record", f"{record['wins']}-{record['losses']}")
+            m2.metric("Avg points", f"{summary['points_for']:.1f}")
+            m3.metric("Avg point diff", f"{summary['point_diff']:+.1f}")
+
+        map_left, map_right = st.columns(2)
+        with map_left:
+            st.markdown("**Next game**")
+            render_team_upcoming(map_team, bundle.schedules, 1)
+        with map_right:
+            st.markdown("**Player status**")
+            render_injury_summary(injuries, map_team, compact=True)
 
 
 with tab_accuracy:
