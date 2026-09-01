@@ -1368,6 +1368,8 @@ with tab_map:
 
     if "league_map_team" not in st.session_state:
         st.session_state["league_map_team"] = teams[0] if teams else None
+    if "map_team_fallback" not in st.session_state and teams:
+        st.session_state["map_team_fallback"] = st.session_state["league_map_team"]
 
     try:
         selected_objects = map_event.selection.objects.get("team-logos", [])
@@ -1375,15 +1377,13 @@ with tab_map:
             selected_code = clean_text(selected_objects[0].get("team"))
             if selected_code in teams:
                 st.session_state["league_map_team"] = selected_code
+                st.session_state["map_team_fallback"] = selected_code
     except Exception:
         pass
 
     fallback_team = st.selectbox(
         "Or choose a team",
         teams,
-        index=teams.index(st.session_state["league_map_team"])
-        if st.session_state.get("league_map_team") in teams
-        else 0,
         format_func=team_label,
         key="map_team_fallback",
     )
