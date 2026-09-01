@@ -15,6 +15,13 @@ from model import (
     upcoming_games,
 )
 from offseason import OFFSEASON_FEATURES, OFFSEASON_DISPLAY_NAMES
+from injuries import injury_status_counts, latest_team_injuries, load_injury_data
+from team_data import (
+    current_season_summary,
+    recent_team_games,
+    team_record,
+    team_upcoming_games,
+)
 
 MODEL_CACHE_VERSION = "weather-schema-v1"
 
@@ -237,6 +244,118 @@ def render_movement_column(title, players, position_group, empty_text):
     )
 
 
+def record_label(team_games, team, season):
+    record = team_record(team_games, team, season)
+    return f"{record['wins']}-{record['losses']}"
+
+
+def recent_form_label(team_games, team, limit=5):
+    recent = recent_team_games(team_games, team, limit)
+    if recent.empty:
+        return "No recent games"
+    return " ".join(recent["result"].astype(str).tolist())
+
+
+def injury_table_for_team(injury_data, team):
+    latest = latest_team_injuries(injury_data, team)
+    if latest.empty:
+        return latest
+
+    display = latest.copy()
+    rename_map = {
+        "full_name": "Player",
+        "position": "Pos",
+        "report_primary_injury": "Injury",
+        "report_secondary_injury": "Secondary",
+        "report_status": "Game status",
+        "practice_status": "Practice",
+        "date_modified": "Updated",
+        "week": "Week",
+    }
+    display = display.rename(columns={k: v for k, v in rename_map.items() if k in display.columns})
+
+    if "Updated" in display.columns:
+        display["Updated"] = pd.to_datetime(display["Updated"], errors="coerce").dt.strftime("%b %d, %I:%M %p")
+
+    priority = {"out": 0, "doubtful": 1, "questionable": 2}
+    if "Game status" in display.columns:
+        display["_priority"] = (
+            display["Game status"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .map(priority)
+            .fillna(9)
+        )
+        display = display.sort_values(["_priority", "Pos", "Player"]).drop(columns=["_priority"])
+
+    return display.reset_index(drop=True)
+
+
+def render_injury_summary(injury_data, team, compact=False):
+    latest = latest_team_injuries(injury_data, team)
+    counts = injury_status_counts(latest)
+
+    if compact:
+        st.caption(
+            f"Out: {counts['Out']} • Doubtful: {counts['Doubtful']} • "
+            f"Questionable: {counts['Questionable']}"
+        )
+        return
+
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Out", counts["Out"])
+    i2.metric("Doubtful", counts["Doubtful"])
+    i3.metric("Questionable", counts["Questionable"])
+
+    table = injury_table_for_team(injury_data, team)
+    if table.empty:
+        st.info("No official injury report is available for this team yet.")
+    else:
+        st.dataframe(table, hide_index=True, use_container_width=True)
+
+
+def render_team_recent_games(team_games, team):
+    recent = recent_team_games(team_games, team, 5)
+    if recent.empty:
+        st.info("No completed games found.")
+        return
+
+    display = recent.copy()
+    display["Date"] = pd.to_datetime(display["gameday"], errors="coerce").dt.strftime("%b %d, %Y")
+    display["Opponent"] = display["opponent"].map(lambda code: team_name(code))
+    display["Result"] = display["result"]
+    display["Score"] = display["score"]
+    display["Point diff"] = display["point_diff_display"]
+    st.dataframe(
+        display[["Date", "Opponent", "Result", "Score", "Point diff"]],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    chart = display[["Opponent", "point_diff_display"]].copy()
+    chart = chart.rename(columns={"point_diff_display": "Point differential"}).set_index("Opponent")
+    st.bar_chart(chart)
+
+
+def render_team_upcoming(team, schedules, limit=5):
+    future = team_upcoming_games(schedules, team, limit)
+    if future.empty:
+        st.info("No upcoming games found.")
+        return
+
+    for _, game in future.iterrows():
+        home = clean_text(game.get("home_team"))
+        away = clean_text(game.get("away_team"))
+        opponent = away if home == team else home
+        venue = format_game_location(game)
+        st.markdown(
+            f"**{team_name(opponent)}** — {format_kickoff(game)}  
+"
+            f"📍 {venue}"
+        )
+
+
 st.set_page_config(
     page_title="NFL Prediction Lab",
     page_icon="🏈",
@@ -278,6 +397,11 @@ def get_model(_schedules, _team_stats, data_signature, model_cache_version):
     return train_model(_schedules, _team_stats)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def get_injuries(season):
+    return load_injury_data(season)
+
+
 with st.sidebar:
     st.header("Data controls")
     if st.button("↻ Refresh NFL data", use_container_width=True):
@@ -317,6 +441,10 @@ try:
             signature,
             MODEL_CACHE_VERSION,
         )
+        current_season = int(
+            pd.to_numeric(schedules["season"], errors="coerce").dropna().max()
+        )
+        injuries = get_injuries(current_season)
 
 except Exception as exc:
     st.error("The dashboard could not load or train the NFL model.")
@@ -326,8 +454,16 @@ except Exception as exc:
 
 teams = available_teams(bundle)
 
-tab_predict, tab_upcoming, tab_offseason, tab_accuracy, tab_method = st.tabs(
-    ["Matchup Predictor", "Upcoming Games", "Offseason Changes", "Model Accuracy", "How It Works"]
+tab_predict, tab_team, tab_upcoming, tab_offseason, tab_injuries, tab_accuracy, tab_method = st.tabs(
+    [
+        "Matchup Predictor",
+        "Team Hub",
+        "Upcoming Games",
+        "Offseason Changes",
+        "Player Status",
+        "Model Accuracy",
+        "How It Works",
+    ]
 )
 
 with tab_predict:
@@ -366,16 +502,51 @@ with tab_predict:
         home_name = team_name(home)
         predicted_name = team_name(result["predicted_winner"])
 
-        p1, p2, p3 = st.columns(3)
-        p1.metric(f"{away_name} win probability", f"{result['away_probability']:.1%}")
-        p2.metric(f"{home_name} win probability", f"{result['home_probability']:.1%}")
-        p3.metric("Model pick", predicted_name)
+        with st.container(border=True):
+            away_card, center_card, home_card = st.columns([1, 1.25, 1])
+
+            with away_card:
+                st.image(team_logo_url(away), width=105)
+                st.markdown(f"### {away_name}")
+                st.caption(
+                    f"Away • Record {record_label(bundle.team_games, away, current_season)} • "
+                    f"Last 5: {recent_form_label(bundle.team_games, away)}"
+                )
+
+            with center_card:
+                st.markdown("<div style='text-align:center'><b>MODEL MATCHUP</b></div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='text-align:center;font-size:1.35rem;margin:.5rem 0'>"
+                    f"<b>{away_name}</b> @ <b>{home_name}</b></div>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("Model pick", predicted_name)
+                p_away, p_home = st.columns(2)
+                p_away.metric(away, f"{result['away_probability']:.1%}")
+                p_home.metric(home, f"{result['home_probability']:.1%}")
+
+            with home_card:
+                st.image(team_logo_url(home), width=105)
+                st.markdown(f"### {home_name}")
+                st.caption(
+                    f"Home • Record {record_label(bundle.team_games, home, current_season)} • "
+                    f"Last 5: {recent_form_label(bundle.team_games, home)}"
+                )
 
         st.progress(result["confidence"])
         st.caption(
             f"Model confidence in its higher-probability side: {result['confidence']:.1%}. "
             "A probability is not a guarantee."
         )
+
+        st.markdown("#### Player availability")
+        inj_away, inj_home = st.columns(2)
+        with inj_away:
+            st.markdown(f"**{away_name}**")
+            render_injury_summary(injuries, away, compact=True)
+        with inj_home:
+            st.markdown(f"**{home_name}**")
+            render_injury_summary(injuries, home, compact=True)
 
         st.markdown("#### Biggest statistical drivers")
         factor_df = pd.DataFrame(result["factors"][:8])
@@ -403,6 +574,68 @@ with tab_predict:
                 }
             )
         st.dataframe(pd.DataFrame(profile_rows), hide_index=True, use_container_width=True)
+
+
+with tab_team:
+    st.subheader("Team Hub")
+    selected_team = st.selectbox(
+        "Choose a team",
+        teams,
+        format_func=team_label,
+        key="team_hub_team",
+    )
+
+    hub_left, hub_right = st.columns([1, 3])
+    with hub_left:
+        st.image(team_logo_url(selected_team), width=150)
+    with hub_right:
+        st.markdown(f"## {team_name(selected_team)}")
+        record = team_record(bundle.team_games, selected_team, current_season)
+        summary = current_season_summary(bundle.team_games, selected_team, current_season)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(f"{current_season} Record", f"{record['wins']}-{record['losses']}")
+        m2.metric("Avg points", f"{summary['points_for']:.1f}")
+        m3.metric("Avg allowed", f"{summary['points_against']:.1f}")
+        m4.metric("Avg point diff", f"{summary['point_diff']:+.1f}")
+
+    recent_col, schedule_col = st.columns(2)
+    with recent_col:
+        st.markdown("### Last 5 completed games")
+        render_team_recent_games(bundle.team_games, selected_team)
+    with schedule_col:
+        st.markdown("### Next games")
+        render_team_upcoming(selected_team, bundle.schedules, 5)
+
+    st.markdown("### Latest player status")
+    render_injury_summary(injuries, selected_team)
+
+    if not bundle.offseason.empty:
+        latest_offseason = bundle.offseason[
+            (bundle.offseason["team"] == selected_team)
+            & (bundle.offseason["season"] == bundle.offseason["season"].max())
+        ]
+        if not latest_offseason.empty:
+            row = latest_offseason.iloc[-1]
+            additions = parse_player_details(row.get("added_player_details", ""))
+            departures = parse_player_details(row.get("departed_player_details", ""))
+
+            st.markdown("### Offseason snapshot")
+            add_col, loss_col = st.columns(2)
+            with add_col:
+                top_adds = movement_dataframe(additions, "All").head(5)
+                st.markdown("**Top additions**")
+                if top_adds.empty:
+                    st.caption("No additions found.")
+                else:
+                    st.dataframe(top_adds, hide_index=True, use_container_width=True)
+            with loss_col:
+                top_losses = movement_dataframe(departures, "All").head(5)
+                st.markdown("**Top departures**")
+                if top_losses.empty:
+                    st.caption("No departures found.")
+                else:
+                    st.dataframe(top_losses, hide_index=True, use_container_width=True)
 
 
 with tab_upcoming:
@@ -582,6 +815,25 @@ with tab_offseason:
                 "Roster additions and departures come from comparing prior-season and current-season "
                 "nflverse rosters. Draft and trade names come from nflverse datasets."
             )
+
+
+with tab_injuries:
+    st.subheader("Player Status")
+    st.caption(
+        "Latest official weekly NFL injury-report information from nflverse. "
+        "This panel is informational and does not change the model prediction."
+    )
+
+    injury_team = st.selectbox(
+        "Team",
+        teams,
+        format_func=team_label,
+        key="injury_team",
+    )
+
+    st.image(team_logo_url(injury_team), width=100)
+    st.markdown(f"### {team_name(injury_team)}")
+    render_injury_summary(injuries, injury_team)
 
 
 with tab_accuracy:
