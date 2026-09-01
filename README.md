@@ -84,7 +84,7 @@ The access layer uses:
 
 Create a Supabase project, open its SQL editor, and run `setup_access.sql` from this repository.
 
-The table has no public RLS policies. The app uses the Supabase service-role key on the server side.
+The table has no public RLS policies. The app uses a Supabase server-side Secret key in Streamlit Secrets.
 
 ### 2. Configure Auth0 email sign-in
 
@@ -110,7 +110,7 @@ Open the deployed app's **Settings → Secrets** and copy the structure from:
 
 Replace every placeholder with the real value. The email in `admin_emails` is the administrator account that can always enter the app and manage invitations.
 
-Generate a long random `cookie_secret`. Keep the Auth0 client secret, Supabase service-role key, and Resend API key only in Streamlit Secrets.
+Generate a long random `cookie_secret`. Keep the Auth0 client secret, Supabase Secret key, and Resend API key only in Streamlit Secrets.
 
 ### 4. Configure invitation email
 
