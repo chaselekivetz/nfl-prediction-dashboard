@@ -2,6 +2,7 @@ import json
 
 import streamlit as st
 import pandas as pd
+import pydeck as pdk
 
 from access_control import require_access, render_access_sidebar
 
@@ -22,7 +23,16 @@ from team_data import (
     team_record,
     team_upcoming_games,
 )
-from fun_features import current_week, games_for_week, league_map_frame, upcoming_games_for_week
+from fun_features import (
+    challenge_active_week,
+    completed_challenge_weeks,
+    current_week,
+    games_for_week,
+    league_map_frame,
+    regular_season_weeks,
+    upcoming_games_for_week,
+    week_is_complete,
+)
 from prediction_game import (
     POSITION_STATS,
     STAT_LABELS,
@@ -36,8 +46,10 @@ from prediction_game import (
     set_favorite_team,
     stat_predictions_for_user,
     user_score,
+    weekly_user_score,
     winner_pick_for_user,
 )
+from team_history import team_history
 
 MODEL_CACHE_VERSION = "player-impact-role-v2"
 
@@ -548,6 +560,13 @@ try:
         challenge_roster = get_challenge_roster(current_season)
         challenge_stats = get_challenge_stats(current_season)
         active_week = current_week(schedules, current_season)
+        active_challenge_week = challenge_active_week(schedules, current_season)
+        challenge_completed_weeks = completed_challenge_weeks(schedules, current_season)
+        challenge_regular_weeks = regular_season_weeks(schedules, current_season)
+        challenge_season_finished = bool(
+            challenge_regular_weeks
+            and len(challenge_completed_weeks) == len(challenge_regular_weeks)
+        )
 
 except Exception as exc:
     st.error("The dashboard could not load or train the NFL model.")
@@ -656,13 +675,35 @@ with tab_home:
         st.markdown("### Weekly Challenge")
         my_score = user_score(current_user.email, schedules, challenge_stats)
         s1, s2, s3 = st.columns(3)
-        s1.metric("Total points", my_score["total"])
+        s1.metric("Season points", my_score["total"])
         s2.metric("Winner-pick points", my_score["winner_points"])
         s3.metric("Stat points", my_score["stat_points"])
-        st.caption(
-            "Correct winner picks earn 10 points. Player-stat challenges earn up to 10 "
-            "points based on accuracy. Nothing is staked or lost."
-        )
+
+        if challenge_season_finished:
+            st.success("Regular-season challenge complete. All weeks have been scored.")
+        else:
+            st.info(
+                f"Week {active_challenge_week} is unlocked. Future weeks stay locked "
+                "until every game in this week is final."
+            )
+
+        if challenge_completed_weeks:
+            last_scored_week = max(challenge_completed_weeks)
+            last_week_score = weekly_user_score(
+                current_user.email,
+                schedules,
+                challenge_stats,
+                current_season,
+                last_scored_week,
+            )
+            st.caption(
+                f"Week {last_scored_week} final score: {last_week_score['total']} points. "
+                "Weekly points are added only after the entire week is complete."
+            )
+        else:
+            st.caption(
+                "Your season score stays at zero until every game in Week 1 is final."
+            )
 
         standings = leaderboard(schedules, challenge_stats)
         if not standings.empty:
@@ -673,26 +714,48 @@ with tab_home:
 
 
 with tab_challenge:
-    st.subheader("Weekly Prediction Challenge")
+    st.subheader(
+        "Weekly Prediction Challenge"
+        if challenge_season_finished
+        else f"Weekly Prediction Challenge — Week {active_challenge_week}"
+    )
     st.caption(
-        "Pick game winners and predict player stats to earn points. Entries lock at kickoff. "
-        "This is a points game only—there are no stakes, odds, payouts, or bankrolls."
+        "Only the current week is available. Future weeks unlock automatically after every "
+        "game in the current week is final. The entire week's score is then added at once."
     )
 
-    challenge_week = st.selectbox(
-        "Week",
-        list(range(1, 17)),
-        index=max(0, min(15, active_week - 1)),
-        key="challenge_week",
-    )
-
+    challenge_week = active_challenge_week
     week_games = games_for_week(schedules, current_season, challenge_week)
 
     score = user_score(current_user.email, schedules, challenge_stats)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Your points", score["total"])
-    c2.metric("Settled winner picks", score["settled_winners"])
-    c3.metric("Settled stat challenges", score["settled_stats"])
+    c1.metric("Season points", score["total"])
+    c2.metric("Scored winner picks", score["settled_winners"])
+    c3.metric("Scored stat challenges", score["settled_stats"])
+
+    if challenge_completed_weeks:
+        previous_week = max(challenge_completed_weeks)
+        previous_score = weekly_user_score(
+            current_user.email,
+            schedules,
+            challenge_stats,
+            current_season,
+            previous_week,
+        )
+        with st.container(border=True):
+            st.markdown(f"**Week {previous_week} final**")
+            w1, w2, w3 = st.columns(3)
+            w1.metric("Week points", previous_score["total"])
+            w2.metric("Winner points", previous_score["winner_points"])
+            w3.metric("Stat points", previous_score["stat_points"])
+
+    if challenge_season_finished:
+        st.success("The regular-season challenge is complete. No future weeks remain to unlock.")
+    else:
+        st.info(
+            f"Week {challenge_week} is the only unlocked week. "
+            f"Week {challenge_week + 1} stays locked until this entire week is final."
+        )
 
     st.markdown("### Winner picks")
     if week_games.empty:
@@ -729,7 +792,7 @@ with tab_challenge:
                     st.caption(
                         f"Final winner: {team_name(winner)} • Your pick: {pick_text} • {result_text}"
                     )
-                elif game_is_open(game):
+                elif game_is_open(game) and not challenge_season_finished:
                     options = [away, home]
                     default_index = options.index(existing) if existing in options else 0
                     with st.form(f"winner_pick_{game_id}"):
@@ -755,9 +818,11 @@ with tab_challenge:
                     st.caption("Picks are locked because this game has started.")
 
     st.markdown("### Player-stat challenge")
-    open_games = week_games[
-        week_games.apply(game_is_open, axis=1)
-    ].copy() if not week_games.empty else pd.DataFrame()
+    open_games = (
+        week_games[week_games.apply(game_is_open, axis=1)].copy()
+        if not week_games.empty and not challenge_season_finished
+        else pd.DataFrame()
+    )
 
     if open_games.empty or challenge_roster.empty:
         st.info("Player-stat challenges will be available when an upcoming game and roster data are available.")
@@ -1233,43 +1298,159 @@ with tab_injuries:
 
 
 with tab_map:
-    st.subheader("NFL League Map")
-    st.caption("Explore all 32 teams by location, then open a quick team view below.")
+    st.subheader("NFL Franchise Map")
+    st.caption(
+        "Team logos mark each franchise's current home. Click a logo to open its history."
+    )
 
-    map_data = league_map_frame(TEAM_NAMES)
-    st.map(map_data, latitude="lat", longitude="lon", size=55, zoom=3)
+    map_data = league_map_frame(TEAM_NAMES).copy()
+
+    # Slightly separate teams that share the same stadium so both logos can be selected.
+    map_offsets = {
+        "LA": (-0.06, -0.06),
+        "LAC": (0.06, 0.06),
+        "NYG": (-0.06, -0.05),
+        "NYJ": (0.06, 0.05),
+    }
+
+    map_records = []
+    for _, row in map_data.iterrows():
+        team_code = clean_text(row.get("team"))
+        lat_offset, lon_offset = map_offsets.get(team_code, (0.0, 0.0))
+        map_records.append(
+            {
+                "team": team_code,
+                "name": team_name(team_code),
+                "lat": float(row["lat"]) + lat_offset,
+                "lon": float(row["lon"]) + lon_offset,
+                "icon_data": {
+                    "url": team_logo_url(team_code),
+                    "width": 128,
+                    "height": 128,
+                    "anchorY": 128,
+                },
+            }
+        )
+
+    logo_layer = pdk.Layer(
+        "IconLayer",
+        data=map_records,
+        id="team-logos",
+        get_icon="icon_data",
+        get_position="[lon, lat]",
+        get_size=4,
+        size_scale=12,
+        size_min_pixels=38,
+        size_max_pixels=64,
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    logo_map = pdk.Deck(
+        map_style=None,
+        initial_view_state=pdk.ViewState(
+            latitude=38.3,
+            longitude=-96.5,
+            zoom=3.15,
+            pitch=0,
+        ),
+        layers=[logo_layer],
+        tooltip={"text": "{name}\nClick for franchise history"},
+    )
+
+    map_event = st.pydeck_chart(
+        logo_map,
+        height=520,
+        selection_mode="single-object",
+        on_select="rerun",
+        key="nfl_franchise_logo_map",
+    )
 
     if "league_map_team" not in st.session_state:
         st.session_state["league_map_team"] = teams[0] if teams else None
 
-    st.markdown("### Team explorer")
-    map_cols = st.columns(4)
-    for idx, map_team in enumerate(teams):
-        with map_cols[idx % 4]:
-            st.image(team_logo_url(map_team), width=58)
-            if st.button(team_name(map_team), key=f"map_team_{map_team}", use_container_width=True):
-                st.session_state["league_map_team"] = map_team
+    try:
+        selected_objects = map_event.selection.objects.get("team-logos", [])
+        if selected_objects:
+            selected_code = clean_text(selected_objects[0].get("team"))
+            if selected_code in teams:
+                st.session_state["league_map_team"] = selected_code
+    except Exception:
+        pass
+
+    fallback_team = st.selectbox(
+        "Or choose a team",
+        teams,
+        index=teams.index(st.session_state["league_map_team"])
+        if st.session_state.get("league_map_team") in teams
+        else 0,
+        format_func=team_label,
+        key="map_team_fallback",
+    )
+    if fallback_team != st.session_state.get("league_map_team"):
+        st.session_state["league_map_team"] = fallback_team
 
     map_team = st.session_state.get("league_map_team")
     if map_team:
+        history = team_history(map_team)
+
         st.divider()
         detail_logo, detail_main = st.columns([1, 3])
         with detail_logo:
-            st.image(team_logo_url(map_team), width=130)
+            st.image(team_logo_url(map_team), width=150)
+
         with detail_main:
             st.markdown(f"## {team_name(map_team)}")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Founded", str(history.get("founded", "—")))
+            h2.metric("Conference", history.get("conference", "—"))
+            h3.metric("Division", history.get("division", "—"))
+            h4.metric(
+                "Franchise age",
+                f"{current_season - int(history.get('founded', current_season))} years"
+                if history.get("founded")
+                else "—",
+            )
+            st.caption(
+                f"{history.get('home', TEAM_HOME_LOCATIONS.get(map_team, ''))} • "
+                f"{history.get('stadium', 'Current stadium')}"
+            )
+
+        st.markdown("### Franchise history")
+        st.write(history.get("history", "Franchise history is being added."))
+
+        history_left, history_right = st.columns([1.15, 1])
+        with history_left:
+            st.markdown("### Franchise legends — curated")
+            legends = history.get("legends", [])
+            if legends:
+                st.markdown(
+                    "\n".join(
+                        f"{idx}. **{player}**"
+                        for idx, player in enumerate(legends, start=1)
+                    )
+                )
+                st.caption(
+                    "This list is a curated franchise-history selection, not an official NFL ranking."
+                )
+            else:
+                st.info("Franchise legends are still being added.")
+
+        with history_right:
+            st.markdown("### Current team snapshot")
             record = team_record(bundle.team_games, map_team, current_season)
-            summary = current_season_summary(bundle.team_games, map_team, current_season)
+            summary = current_season_summary(
+                bundle.team_games,
+                map_team,
+                current_season,
+            )
             m1, m2, m3 = st.columns(3)
             m1.metric("Record", f"{record['wins']}-{record['losses']}")
             m2.metric("Avg points", f"{summary['points_for']:.1f}")
             m3.metric("Avg point diff", f"{summary['point_diff']:+.1f}")
 
-        map_left, map_right = st.columns(2)
-        with map_left:
             st.markdown("**Next game**")
             render_team_upcoming(map_team, bundle.schedules, 1)
-        with map_right:
             st.markdown("**Player status**")
             render_injury_summary(injuries, map_team, compact=True)
 
