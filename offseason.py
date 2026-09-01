@@ -210,19 +210,21 @@ def load_offseason_source_data(seasons: Iterable[int]):
     except Exception:
         trades = pd.DataFrame()
 
-    # Three completed seasons give the UI enough history to recognize
-    # established veterans without allowing old reputation to dominate.
+    # Three completed seasons drive the current player-ranking UI, while
+    # every season's prior year is retained for historical QB-continuity
+    # features used by the model.
     history_years = list(range(max(latest_season - 3, 1999), latest_season))
+    stats_years = sorted(set(history_years + [season - 1 for season in seasons]))
 
     try:
         player_stats = _to_pandas(
-            nfl.load_player_stats(history_years, summary_level="reg")
+            nfl.load_player_stats(stats_years, summary_level="reg")
         )
     except Exception:
         player_stats = pd.DataFrame()
 
     try:
-        snap_counts = _to_pandas(nfl.load_snap_counts(history_years))
+        snap_counts = _to_pandas(nfl.load_snap_counts(stats_years))
     except Exception:
         snap_counts = pd.DataFrame()
 
