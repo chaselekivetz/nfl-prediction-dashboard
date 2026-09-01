@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+import json
 
 import numpy as np
 import pandas as pd
@@ -50,6 +51,8 @@ OFFSEASON_DETAIL_COLUMNS = [
     "drafted_players",
     "trade_added_players",
     "trade_departed_players",
+    "added_player_details",
+    "departed_player_details",
 ]
 
 
@@ -72,6 +75,103 @@ def _position_weight(position):
     if pd.isna(position):
         return 1.0
     return POSITION_WEIGHTS.get(str(position).upper(), 1.0)
+
+
+def _position_group(position):
+    pos = _clean_name(position).upper()
+    if pos == "QB":
+        return "QB"
+    if pos in {"RB", "HB", "FB"}:
+        return "RB"
+    if pos == "WR":
+        return "WR"
+    if pos == "TE":
+        return "TE"
+    if pos in {"LT", "RT", "T", "OT", "G", "OG", "C", "OL"}:
+        return "OL"
+    if pos in {"EDGE", "DE", "DT", "NT", "DL"}:
+        return "DL"
+    if pos in {"LB", "ILB", "OLB", "MLB"}:
+        return "LB"
+    if pos in {"CB", "S", "FS", "SS", "DB"}:
+        return "DB"
+    if pos in {"K", "P", "LS"}:
+        return "ST"
+    return "Other"
+
+
+def _stat_total(rows: pd.DataFrame, names) -> float:
+    if rows.empty:
+        return 0.0
+    for name in names:
+        if name in rows.columns:
+            return float(pd.to_numeric(rows[name], errors="coerce").fillna(0).sum())
+    return 0.0
+
+
+def _prior_usage_score(player_stats: pd.DataFrame, player_id, season: int, position: str) -> float:
+    if player_stats.empty or pd.isna(player_id) or "player_id" not in player_stats.columns:
+        return 0.0
+
+    rows = player_stats[
+        (pd.to_numeric(player_stats.get("season"), errors="coerce") == season)
+        & (player_stats["player_id"].astype(str) == str(player_id))
+    ]
+    if rows.empty:
+        return 0.0
+
+    group = _position_group(position)
+    if group == "QB":
+        attempts = _stat_total(rows, ["passing_attempts"])
+        return min(attempts / 350.0, 1.5)
+    if group == "RB":
+        carries = _stat_total(rows, ["carries", "rushing_attempts"])
+        targets = _stat_total(rows, ["targets"])
+        return min((carries / 180.0) + (targets / 90.0), 1.5)
+    if group in {"WR", "TE"}:
+        targets = _stat_total(rows, ["targets"])
+        return min(targets / 100.0, 1.5)
+
+    tackles = _stat_total(rows, ["tackles", "def_tackles_solo", "def_tackles_combined"])
+    sacks = _stat_total(rows, ["sacks", "def_sacks"])
+    interceptions = _stat_total(rows, ["interceptions", "def_interceptions"])
+    defensive_usage = (tackles / 100.0) + (sacks / 12.0) + (interceptions / 6.0)
+    return min(defensive_usage, 1.5)
+
+
+def _roster_player_details(
+    roster: pd.DataFrame,
+    keys: set[str],
+    player_stats: pd.DataFrame,
+    prior_season: int,
+) -> str:
+    if roster.empty or not keys:
+        return "[]"
+
+    selected = roster[roster["player_key"].isin(keys)].copy()
+    details = []
+    for row in selected.itertuples():
+        name = _clean_name(getattr(row, "full_name", ""))
+        if not name:
+            continue
+
+        position = _clean_name(getattr(row, "position", "")).upper() or "—"
+        player_id = getattr(row, "gsis_id", None)
+        base_weight = float(_position_weight(position))
+        usage = _prior_usage_score(player_stats, player_id, prior_season, position)
+        impact_score = base_weight * (1.0 + 0.35 * usage)
+
+        details.append({
+            "name": name,
+            "position": position,
+            "position_group": _position_group(position),
+            "impact_score": round(float(impact_score), 3),
+            "position_weight": round(base_weight, 3),
+            "prior_usage": round(float(usage), 3),
+        })
+
+    details.sort(key=lambda item: (-item["impact_score"], item["name"]))
+    return json.dumps(details)
 
 
 def _player_key(row):
@@ -343,6 +443,12 @@ def build_offseason_features(seasons: Iterable[int]) -> pd.DataFrame:
                 "trade_departures": trade_departures,
                 "added_players": _roster_player_names(current, additions),
                 "departed_players": _roster_player_names(prior, departures),
+                "added_player_details": _roster_player_details(
+                    current, additions, player_stats, prior_season
+                ),
+                "departed_player_details": _roster_player_details(
+                    prior, departures, player_stats, prior_season
+                ),
                 "drafted_players": _draft_player_names(drafts, season, team),
                 "trade_added_players": trade_added_players,
                 "trade_departed_players": trade_departed_players,
