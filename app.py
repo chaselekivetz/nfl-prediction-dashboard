@@ -39,10 +39,13 @@ from prediction_game import (
     favorite_team,
     game_is_open,
     leaderboard,
+    player_display_name,
+    profile_username,
     load_skill_roster,
     load_weekly_player_stats,
     save_stat_prediction,
     save_winner_pick,
+    save_username,
     set_favorite_team,
     stat_predictions_for_user,
     user_score,
@@ -467,6 +470,38 @@ st.set_page_config(
 current_user = require_access()
 render_access_sidebar(current_user)
 
+app_username = profile_username(current_user.email)
+if not app_username:
+    st.title("🏈 Create your NFL username")
+    st.caption(
+        "This is the name other users will see on the Home screen and Weekly Challenge leaderboard."
+    )
+    with st.form("create_username_form"):
+        new_username = st.text_input(
+            "Username",
+            max_chars=20,
+            placeholder="Example: ChaseNFL",
+            help="3–20 characters. Letters, numbers, and underscores only.",
+        )
+        create_username = st.form_submit_button(
+            "Create username",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if create_username:
+        try:
+            save_username(current_user.email, app_username, new_username)
+            st.success("Username created.")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+    st.info("Your email stays private and is only used for sign-in and account access.")
+    st.stop()
+
+app_username = player_display_name(current_user.email, app_username)
+
 st.markdown(
     """
     <style>
@@ -603,8 +638,43 @@ with tab_home:
 
     top_left, top_right = st.columns([2, 1])
     with top_left:
-        st.markdown(f"### Welcome, {current_user.name}")
+        st.markdown(f"### Welcome, {app_username}")
         st.caption("Your weekly NFL dashboard, prediction challenge, and team explorer.")
+
+        if "show_username_editor" not in st.session_state:
+            st.session_state["show_username_editor"] = False
+
+        if st.button(
+            "Edit username",
+            key="edit_username_button",
+        ):
+            st.session_state["show_username_editor"] = True
+
+        if st.session_state["show_username_editor"]:
+            with st.form("edit_username_form"):
+                edited_username = st.text_input(
+                    "Username",
+                    value=app_username,
+                    max_chars=20,
+                    help="3–20 characters. Letters, numbers, and underscores only.",
+                )
+                save_username_change = st.form_submit_button(
+                    "Save username",
+                    type="primary",
+                )
+
+            if save_username_change:
+                try:
+                    save_username(
+                        current_user.email,
+                        app_username,
+                        edited_username,
+                    )
+                    st.session_state["show_username_editor"] = False
+                    st.success("Username updated.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 
     with top_right:
         if teams and favorite:
@@ -641,7 +711,7 @@ with tab_home:
                     ):
                         set_favorite_team(
                             current_user.email,
-                            current_user.name,
+                            app_username,
                             selected_favorite,
                         )
                         st.session_state["show_favorite_picker"] = False
@@ -807,7 +877,7 @@ with tab_challenge:
                     if submitted:
                         save_winner_pick(
                             current_user.email,
-                            current_user.name,
+                            app_username,
                             current_season,
                             challenge_week,
                             game_id,
@@ -881,7 +951,7 @@ with tab_challenge:
             if st.button("Save stat prediction", type="primary"):
                 save_stat_prediction(
                     current_user.email,
-                    current_user.name,
+                    app_username,
                     current_season,
                     challenge_week,
                     clean_text(selected_game.get("game_id")),
