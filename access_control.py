@@ -256,6 +256,155 @@ def _send_invite_email(email: str, invited_by: str) -> tuple[bool, str]:
     return True, "Invite email sent."
 
 
+def invite_system_status() -> dict:
+    access = _access_config()
+    return {
+        "persistent_storage": _database_is_configured(),
+        "email_delivery": bool(
+            str(access.get("resend_api_key", "")).strip()
+            and str(access.get("from_email", "")).strip()
+            and str(access.get("app_url", "")).strip()
+        ),
+        "app_url": str(access.get("app_url", "")).strip(),
+    }
+
+
+def invite_user(email: str, invited_by: str) -> dict:
+    email = _validate_email(email)
+    if email in _admin_emails():
+        return {
+            "email": email,
+            "approved": True,
+            "email_sent": False,
+            "message": "That email is already an administrator.",
+        }
+
+    _approve_user(email, invited_by)
+    sent, message = _send_invite_email(email, invited_by)
+    return {
+        "email": email,
+        "approved": True,
+        "email_sent": bool(sent),
+        "message": message,
+    }
+
+
+def list_invited_users() -> list[dict]:
+    return _list_users()
+
+
+def revoke_invited_user(email: str) -> None:
+    email = _validate_email(email)
+    if email in _admin_emails():
+        raise ValueError("Administrator access cannot be revoked here.")
+    _revoke_user(email)
+
+
+def render_invite_page(user: AccessUser) -> None:
+    st.title("👥 Invite Friend")
+    st.caption(
+        "Approve a friend's sign-in email and optionally email them the private website link."
+    )
+
+    status = invite_system_status()
+
+    if not status["persistent_storage"]:
+        st.error("Invite storage is not configured yet.")
+        st.info(
+            "The one-click invite page needs Supabase credentials in Streamlit Secrets so "
+            "approved emails survive app restarts and redeploys."
+        )
+        return
+
+    if status["email_delivery"]:
+        st.success("Access approval and invite-email delivery are ready.")
+    else:
+        st.warning(
+            "Access approval is ready, but automatic invite emails are not configured. "
+            "You can still approve a friend and copy the website link for them."
+        )
+
+    with st.form("invite_friend_page_form", clear_on_submit=True):
+        invite_email = st.text_input(
+            "Friend's email",
+            placeholder="friend@example.com",
+            autocomplete="email",
+        )
+        invite_submitted = st.form_submit_button(
+            "Approve & invite",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if invite_submitted:
+        try:
+            result = invite_user(invite_email, user.email)
+            if result["email_sent"]:
+                st.success(
+                    f"{result['email']} is approved and the invitation email was sent."
+                )
+            else:
+                st.success(f"{result['email']} is approved for access.")
+                st.caption(result["message"])
+                if status["app_url"]:
+                    st.code(status["app_url"], language=None)
+        except (ValueError, RuntimeError) as exc:
+            st.error(str(exc))
+        except requests.RequestException as exc:
+            st.error(f"The invite could not be completed: {exc}")
+
+    st.markdown("### Approved users")
+    try:
+        users = list_invited_users()
+    except requests.RequestException as exc:
+        st.error(f"Could not load the access list: {exc}")
+        users = []
+
+    if not users:
+        st.info("No invited users yet.")
+        return
+
+    active_users = [u for u in users if bool(u.get("active"))]
+    st.dataframe(
+        [
+            {
+                "Email": u.get("email", ""),
+                "Active": bool(u.get("active")),
+                "Invited by": u.get("invited_by", ""),
+                "Invited at": u.get("invited_at", ""),
+            }
+            for u in users
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    revokable = sorted(
+        {
+            _normalise_email(u.get("email", ""))
+            for u in active_users
+            if _normalise_email(u.get("email", ""))
+            and _normalise_email(u.get("email", "")) not in _admin_emails()
+        }
+    )
+
+    if revokable:
+        with st.form("revoke_friend_page_form"):
+            revoke_email = st.selectbox("Revoke access", revokable)
+            revoke_submitted = st.form_submit_button(
+                "Revoke selected user",
+                use_container_width=True,
+            )
+
+        if revoke_submitted:
+            try:
+                revoke_invited_user(revoke_email)
+                st.success(f"Access revoked for {revoke_email}.")
+                st.rerun()
+            except (ValueError, RuntimeError, requests.RequestException) as exc:
+                st.error(f"Could not revoke access: {exc}")
+
+
 def _render_admin_panel(user: AccessUser) -> None:
     with st.expander("Admin access", expanded=False):
         st.caption("Approve an email, send its invitation, or revoke an existing user.")
@@ -346,13 +495,23 @@ def _render_admin_panel(user: AccessUser) -> None:
                         st.error(f"Could not revoke access: {exc}")
 
 
-def render_access_sidebar(user: AccessUser) -> None:
+def render_access_sidebar(user: AccessUser) -> str | None:
+    action = None
     with st.sidebar:
         st.subheader("Account")
         st.caption(f"Signed in as {user.email}")
         if user.is_admin:
             st.caption("Administrator")
+            if st.button(
+                "👥 Invite Friend",
+                use_container_width=True,
+                key="open_invite_friend_page",
+            ):
+                st.session_state["admin_page"] = "invite_friend"
+
         st.button("Log out", on_click=st.logout, use_container_width=True)
 
-        if user.is_admin:
-            _render_admin_panel(user)
+        if st.session_state.get("admin_page") == "invite_friend":
+            action = "invite_friend"
+
+    return action
