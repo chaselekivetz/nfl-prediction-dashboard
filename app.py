@@ -23,7 +23,7 @@ from team_data import (
     team_upcoming_games,
 )
 
-MODEL_CACHE_VERSION = "weather-schema-v1"
+MODEL_CACHE_VERSION = "player-impact-role-v2"
 
 
 TEAM_NAMES = {
@@ -217,7 +217,10 @@ def movement_dataframe(players, position_group):
             "Rank": rank,
             "Player": player.get("name", "Unknown"),
             "Position": player.get("position", "—"),
-            "Impact score": round(float(player.get("impact_score", 0.0)), 2),
+            "Projected role": player.get("projected_role", "Role unavailable"),
+            "Recent usage": f"{float(player.get('recent_snap_share', 0.0)):.0%}",
+            "Production grade": f"{100.0 * float(player.get('recent_production', 0.0)):.0f}/100",
+            "Impact score": round(float(player.get("impact_score", 0.0)), 1),
         })
     return pd.DataFrame(rows)
 
@@ -232,8 +235,8 @@ def render_movement_column(title, players, position_group, empty_text):
 
     top = table.iloc[0]
     st.markdown(
-        f"**Top move:** {top['Player']} · {top['Position']}  "
-        f"<span class='small-note'>Impact {top['Impact score']:.2f}</span>",
+        f"**Top move:** {top['Player']} · {top['Position']} · {top['Projected role']}  "
+        f"<span class='small-note'>Projected impact {top['Impact score']:.1f}/100</span>",
         unsafe_allow_html=True,
     )
     st.dataframe(
@@ -750,8 +753,9 @@ with tab_offseason:
                     help="Choose QB, RB, WR, TE, OL, DL, LB, DB, ST, or view everyone.",
                 )
                 st.caption(
-                    "Impact rank uses positional importance plus prior-season usage when available. "
-                    "It is a relative roster-impact score, not a salary or contract-value ranking."
+                    "Projected impact estimates first-season contribution from current depth-chart role, "
+                    "roster status, recent NFL production, snap share, and draft capital. Current role is "
+                    "the strongest multiplier, so backups and practice-squad players are heavily discounted."
                 )
 
             additions_col, losses_col = st.columns(2)
