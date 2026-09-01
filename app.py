@@ -1,3 +1,5 @@
+import json
+
 import streamlit as st
 import pandas as pd
 
@@ -49,6 +51,24 @@ TEAM_NAMES = {
     "TEN": "Tennessee Titans",
     "WAS": "Washington Commanders",
 }
+
+
+
+TEAM_HOME_LOCATIONS = {
+    "ARI": "Glendale, AZ", "ATL": "Atlanta, GA", "BAL": "Baltimore, MD",
+    "BUF": "Orchard Park, NY", "CAR": "Charlotte, NC", "CHI": "Chicago, IL",
+    "CIN": "Cincinnati, OH", "CLE": "Cleveland, OH", "DAL": "Arlington, TX",
+    "DEN": "Denver, CO", "DET": "Detroit, MI", "GB": "Green Bay, WI",
+    "HOU": "Houston, TX", "IND": "Indianapolis, IN", "JAX": "Jacksonville, FL",
+    "KC": "Kansas City, MO", "LV": "Las Vegas, NV", "LAC": "Inglewood, CA",
+    "LA": "Inglewood, CA", "MIA": "Miami Gardens, FL", "MIN": "Minneapolis, MN",
+    "NE": "Foxborough, MA", "NO": "New Orleans, LA", "NYG": "East Rutherford, NJ",
+    "NYJ": "East Rutherford, NJ", "PHI": "Philadelphia, PA", "PIT": "Pittsburgh, PA",
+    "SEA": "Seattle, WA", "SF": "Santa Clara, CA", "TB": "Tampa, FL",
+    "TEN": "Nashville, TN", "WAS": "Landover, MD",
+}
+
+POSITION_GROUP_ORDER = ["All", "QB", "RB", "WR", "TE", "OL", "DL", "LB", "DB", "ST", "Other"]
 
 TEAM_LOGO_CODES = {
     "ARI": "ari",
@@ -116,6 +136,103 @@ def show_player_list(title, value, empty_text):
         st.caption(empty_text)
         return
     st.markdown("\n".join(f"- {name}" for name in names))
+
+
+def clean_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none"} else text
+
+
+def format_kickoff(game):
+    gameday = pd.to_datetime(game.get("gameday"), errors="coerce")
+    date_text = "Date TBD"
+    if pd.notna(gameday):
+        date_text = f"{gameday.strftime('%b')} {gameday.day}, {gameday.year}"
+
+    time_text = "TBD"
+    raw_time = clean_text(game.get("gametime"))
+    if raw_time:
+        try:
+            parsed = pd.to_datetime(raw_time, format="%H:%M", errors="raise")
+            time_text = parsed.strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            time_text = raw_time
+
+    return f"{time_text} ET • {date_text}"
+
+
+def format_game_location(game):
+    stadium = clean_text(game.get("stadium"))
+    location_flag = clean_text(game.get("location")).lower()
+    home_team = clean_text(game.get("home_team"))
+
+    if location_flag == "neutral":
+        return f"{stadium} • Neutral site" if stadium else "Neutral site"
+
+    city = TEAM_HOME_LOCATIONS.get(home_team, "")
+    if stadium and city:
+        return f"{stadium} • {city}"
+    return stadium or city or "Location TBD"
+
+
+def parse_player_details(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    text = clean_text(value)
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def movement_dataframe(players, position_group):
+    filtered = [
+        player for player in players
+        if position_group == "All" or player.get("position_group") == position_group
+    ]
+    filtered = sorted(
+        filtered,
+        key=lambda player: (-float(player.get("impact_score", 0.0)), player.get("name", "")),
+    )
+
+    rows = []
+    for rank, player in enumerate(filtered, start=1):
+        rows.append({
+            "Rank": rank,
+            "Player": player.get("name", "Unknown"),
+            "Position": player.get("position", "—"),
+            "Impact score": round(float(player.get("impact_score", 0.0)), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_movement_column(title, players, position_group, empty_text):
+    st.markdown(f"### {title}")
+    table = movement_dataframe(players, position_group)
+
+    if table.empty:
+        st.caption(empty_text)
+        return
+
+    top = table.iloc[0]
+    st.markdown(
+        f"**Top move:** {top['Player']} · {top['Position']}  "
+        f"<span class='small-note'>Impact {top['Impact score']:.2f}</span>",
+        unsafe_allow_html=True,
+    )
+    st.dataframe(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        height=min(420, 78 + (len(table) * 35)),
+    )
 
 
 st.set_page_config(
@@ -283,18 +400,44 @@ with tab_predict:
 
 with tab_upcoming:
     st.subheader("Upcoming schedule")
+    st.caption("Kickoff times are shown in Eastern Time.")
     upcoming = upcoming_games(bundle.schedules, 20)
 
     if upcoming.empty:
         st.info("No upcoming non-preseason games were found in the current schedule file.")
     else:
-        upcoming_display = upcoming.copy()
-        for column in ["away_team", "home_team", "Away", "Home"]:
-            if column in upcoming_display.columns:
-                upcoming_display[column] = upcoming_display[column].map(
-                    lambda value: team_name(value) if value in TEAM_NAMES else value
-                )
-        st.dataframe(upcoming_display, hide_index=True, use_container_width=True)
+        for _, game in upcoming.iterrows():
+            away_team = clean_text(game.get("away_team"))
+            home_team = clean_text(game.get("home_team"))
+            week = clean_text(game.get("week"))
+
+            with st.container(border=True):
+                header_left, header_right = st.columns([1, 2])
+                with header_left:
+                    st.caption(f"Week {week}" if week else "Upcoming game")
+                with header_right:
+                    st.markdown(
+                        f"<div style='text-align:right;font-weight:600'>{format_kickoff(game)}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                away_col, at_col, home_col = st.columns([1, 0.24, 1])
+                with away_col:
+                    st.image(team_logo_url(away_team), width=72)
+                    st.markdown(f"**{team_name(away_team)}**")
+                    st.caption("Away")
+                with at_col:
+                    st.markdown(
+                        "<div style='text-align:center;padding-top:38px;font-size:1.35rem;font-weight:700'>@</div>",
+                        unsafe_allow_html=True,
+                    )
+                with home_col:
+                    st.image(team_logo_url(home_team), width=72)
+                    st.markdown(f"**{team_name(home_team)}**")
+                    st.caption("Home")
+
+                st.markdown(f"📍 **{format_game_location(game)}**")
+
         st.caption(
             "Use any matchup from this list in the Matchup Predictor. "
             "Final scores are incorporated after a data refresh."
@@ -304,8 +447,8 @@ with tab_upcoming:
 with tab_offseason:
     st.subheader("2026 offseason roster, trade, and draft changes")
     st.caption(
-        "The model still uses numeric roster, draft, and trade features behind the scenes. "
-        "This view shows the actual player movement that produced those inputs."
+        "Select a team and position group to browse offseason additions and departures, "
+        "ranked from highest estimated impact to lowest."
     )
 
     if bundle.offseason.empty:
@@ -318,89 +461,102 @@ with tab_offseason:
         if not offseason_teams:
             st.warning("No team-level offseason rows are available for the latest season.")
         else:
-            selected_logo = st.empty()
-            selected_team = st.selectbox(
-                f"{latest_season} team",
-                offseason_teams,
-                format_func=team_label,
-                key="offseason_team",
-            )
-            show_team_logo(selected_logo, selected_team)
+            team_left, team_right = st.columns([1, 2])
+            with team_left:
+                selected_logo = st.empty()
+                selected_team = st.selectbox(
+                    f"{latest_season} team",
+                    offseason_teams,
+                    format_func=team_label,
+                    key="offseason_team",
+                )
+                show_team_logo(selected_logo, selected_team)
 
             team_row = latest[latest["team"] == selected_team].iloc[-1]
-            st.markdown(f"### {team_name(selected_team)}")
+            added_details = parse_player_details(team_row.get("added_player_details", ""))
+            departed_details = parse_player_details(team_row.get("departed_player_details", ""))
 
-            a1, a2 = st.columns(2)
-            with a1:
-                show_player_list(
-                    "Players acquired / added",
-                    team_row.get("added_players", ""),
-                    "No roster additions were found in the current source data.",
-                )
-            with a2:
-                show_player_list(
-                    "Players moved away / departed",
-                    team_row.get("departed_players", ""),
-                    "No roster departures were found in the current source data.",
-                )
+            available_groups = {
+                player.get("position_group", "Other")
+                for player in added_details + departed_details
+            }
+            position_options = [
+                group for group in POSITION_GROUP_ORDER
+                if group == "All" or group in available_groups
+            ]
 
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                show_player_list(
-                    f"{latest_season} draft class",
-                    team_row.get("drafted_players", ""),
-                    "No drafted-player names were found.",
+            with team_right:
+                st.markdown(f"### {team_name(selected_team)}")
+                position_group = st.selectbox(
+                    "Position group",
+                    position_options,
+                    key="offseason_position_group",
+                    help="Choose QB, RB, WR, TE, OL, DL, LB, DB, ST, or view everyone.",
                 )
-            with d2:
-                show_player_list(
-                    "Trade acquisitions",
-                    team_row.get("trade_added_players", ""),
-                    "No player trade acquisitions were found.",
-                )
-            with d3:
-                show_player_list(
-                    "Trade departures",
-                    team_row.get("trade_departed_players", ""),
-                    "No player trade departures were found.",
+                st.caption(
+                    "Impact rank uses positional importance plus prior-season usage when available. "
+                    "It is a relative roster-impact score, not a salary or contract-value ranking."
                 )
 
-            st.markdown("#### Model offseason inputs")
-            model_rows = []
-            for feature in OFFSEASON_FEATURES:
-                value = team_row.get(feature, 0.0)
-                if feature in {"roster_continuity", "addition_weight", "departure_weight"}:
-                    display_value = f"{float(value):.1%}"
-                elif feature == "qb_returning":
-                    display_value = "Yes" if float(value) >= 0.5 else "No"
-                else:
-                    display_value = f"{float(value):.2f}"
-                model_rows.append(
-                    {
-                        "Model input": OFFSEASON_DISPLAY_NAMES[feature],
-                        "Value": display_value,
-                    }
+            additions_col, losses_col = st.columns(2)
+            with additions_col:
+                render_movement_column(
+                    "⬆️ Acquired / Added",
+                    added_details,
+                    position_group,
+                    "No additions found for this position group.",
                 )
-            st.dataframe(pd.DataFrame(model_rows), hide_index=True, use_container_width=True)
+            with losses_col:
+                render_movement_column(
+                    "⬇️ Departed / Lost",
+                    departed_details,
+                    position_group,
+                    "No departures found for this position group.",
+                )
+
+            with st.expander("Draft class and trade log"):
+                d1, d2, d3 = st.columns(3)
+                with d1:
+                    show_player_list(
+                        f"{latest_season} draft class",
+                        team_row.get("drafted_players", ""),
+                        "No drafted-player names were found.",
+                    )
+                with d2:
+                    show_player_list(
+                        "Trade acquisitions",
+                        team_row.get("trade_added_players", ""),
+                        "No player trade acquisitions were found.",
+                    )
+                with d3:
+                    show_player_list(
+                        "Trade departures",
+                        team_row.get("trade_departed_players", ""),
+                        "No player trade departures were found.",
+                    )
+
+            with st.expander("Model offseason inputs"):
+                model_rows = []
+                for feature in OFFSEASON_FEATURES:
+                    value = team_row.get(feature, 0.0)
+                    if feature in {"roster_continuity", "addition_weight", "departure_weight"}:
+                        display_value = f"{float(value):.1%}"
+                    elif feature == "qb_returning":
+                        display_value = "Yes" if float(value) >= 0.5 else "No"
+                    else:
+                        display_value = f"{float(value):.2f}"
+                    model_rows.append(
+                        {
+                            "Model input": OFFSEASON_DISPLAY_NAMES[feature],
+                            "Value": display_value,
+                        }
+                    )
+                st.dataframe(pd.DataFrame(model_rows), hide_index=True, use_container_width=True)
 
             st.caption(
-                "Roster additions and departures are found by comparing the prior-season and "
-                "current-season nflverse rosters. Draft and trade names come from nflverse datasets."
+                "Roster additions and departures come from comparing prior-season and current-season "
+                "nflverse rosters. Draft and trade names come from nflverse datasets."
             )
-
-        st.markdown(
-            """
-            **How the model uses offseason changes**
-
-            - **Roster continuity** measures how much weighted personnel returned from the previous season.
-            - **Veteran additions/departures** measure weighted roster turnover by position importance.
-            - **Draft class impact** gives earlier picks and higher-impact positions more initial weight.
-            - **Primary QB continuity** checks whether the previous season's leading passer is still on the roster.
-            - **Trade additions/departures** measure player movement recorded in the trade dataset.
-
-            The player names are there to make the data transparent. The logistic-regression model
-            continues to train on the numeric features rather than treating every player as equally valuable.
-            """
-        )
 
 
 with tab_accuracy:
