@@ -16,6 +16,15 @@ from offseason import (
     build_offseason_features,
     team_offseason_snapshot,
 )
+from weather import (
+    WEATHER_DISPLAY_NAMES,
+    WEATHER_GAME_COLUMNS,
+    WEATHER_MODEL_FEATURES,
+    WEATHER_TEAM_FEATURES,
+    add_schedule_weather,
+    add_team_weather_history,
+    model_weather_values,
+)
 
 
 BASE_FEATURES = [
@@ -168,6 +177,7 @@ def completed_games(schedules: pd.DataFrame) -> pd.DataFrame:
             pd.to_numeric(s["week"], errors="coerce").fillna(0) * 7, unit="D"
         )
 
+    s = add_schedule_weather(s)
     return s.sort_values(["gameday", "game_id"]).reset_index(drop=True)
 
 
@@ -175,17 +185,32 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame, offseaso
     games = completed_games(schedules)
     stats = normalize_team_stats(team_stats)
 
-    home = games[["game_id", "season", "week", "gameday", "home_team", "away_team", "home_score", "away_score"]].copy()
+    base_game_cols = [
+        "game_id",
+        "season",
+        "week",
+        "gameday",
+        "home_team",
+        "away_team",
+        "home_score",
+        "away_score",
+    ] + WEATHER_GAME_COLUMNS
+
+    home = games[base_game_cols].copy()
     home = home.rename(columns={
-        "home_team": "team", "away_team": "opponent",
-        "home_score": "points_for", "away_score": "points_against",
+        "home_team": "team",
+        "away_team": "opponent",
+        "home_score": "points_for",
+        "away_score": "points_against",
     })
     home["is_home"] = 1
 
-    away = games[["game_id", "season", "week", "gameday", "home_team", "away_team", "home_score", "away_score"]].copy()
+    away = games[base_game_cols].copy()
     away = away.rename(columns={
-        "away_team": "team", "home_team": "opponent",
-        "away_score": "points_for", "home_score": "points_against",
+        "away_team": "team",
+        "home_team": "opponent",
+        "away_score": "points_for",
+        "home_score": "points_against",
     })
     away["is_home"] = 0
 
@@ -201,7 +226,8 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame, offseaso
     })
     tg = tg.merge(
         opp_stats[["game_id", "opponent", "yards_allowed", "opponent_turnovers_lost"]],
-        on=["game_id", "opponent"], how="left"
+        on=["game_id", "opponent"],
+        how="left",
     )
 
     tg["yards_for"] = tg["yards_for"].fillna(0.0)
@@ -235,6 +261,8 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame, offseaso
         lambda x: x.shift(1).rolling(12, min_periods=1).mean()
     )
 
+    tg = add_team_weather_history(tg)
+
     opp_strength = tg[["game_id", "team", "prior_win_pct"]].rename(
         columns={"team": "opponent", "prior_win_pct": "opponent_strength"}
     )
@@ -245,27 +273,55 @@ def build_training_games(team_games: pd.DataFrame) -> pd.DataFrame:
     home = team_games[team_games["is_home"] == 1].copy()
     away = team_games[team_games["is_home"] == 0].copy()
 
-    home_cols = ["game_id", "season", "week", "gameday", "team", "opponent", "win"] + FEATURES
-    away_cols = ["game_id", "team"] + FEATURES
+    weather_cols = WEATHER_TEAM_FEATURES + WEATHER_GAME_COLUMNS
+    home_cols = ["game_id", "season", "week", "gameday", "team", "opponent", "win"] + FEATURES + weather_cols
+    away_cols = ["game_id", "team"] + FEATURES + weather_cols
 
-    home = home[home_cols].rename(columns={"team": "home_team", "opponent": "away_team", "win": "home_win"})
+    home = home[home_cols].rename(
+        columns={"team": "home_team", "opponent": "away_team", "win": "home_win"}
+    )
     away = away[away_cols].rename(columns={"team": "away_team"})
     merged = home.merge(away, on=["game_id", "away_team"], suffixes=("_home", "_away"))
 
     for feature in FEATURES:
         merged[f"diff_{feature}"] = merged[f"{feature}_home"] - merged[f"{feature}_away"]
 
+    # Weather severity is shared by both teams in a game. Team edges compare
+    # each club's prior point-differential performance in similar conditions.
+    merged["weather_cold_severity"] = merged["cold_severity_home"]
+    merged["weather_wind_severity"] = merged["wind_severity_home"]
+    merged["weather_heat_severity"] = merged["heat_severity_home"]
+    merged["weather_outdoor"] = merged["outdoor_game_home"] * merged["weather_known_home"]
+    merged["weather_cold_edge"] = merged["cold_severity_home"] * (
+        merged["weather_cold_form_home"] - merged["weather_cold_form_away"]
+    )
+    merged["weather_wind_edge"] = merged["wind_severity_home"] * (
+        merged["weather_wind_form_home"] - merged["weather_wind_form_away"]
+    )
+    merged["weather_heat_edge"] = merged["heat_severity_home"] * (
+        merged["weather_heat_form_home"] - merged["weather_heat_form_away"]
+    )
+
     diff_features = [f"diff_{f}" for f in FEATURES]
-    merged = merged.dropna(subset=diff_features + ["home_win"]).copy()
+    model_features = diff_features + WEATHER_MODEL_FEATURES
+    merged = merged.dropna(subset=model_features + ["home_win"]).copy()
     return merged.sort_values(["gameday", "game_id"]).reset_index(drop=True)
 
 
 def train_model(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> ModelBundle:
-    seasons = sorted(pd.to_numeric(schedules["season"], errors="coerce").dropna().astype(int).unique().tolist())
+    seasons = sorted(
+        pd.to_numeric(schedules["season"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
     offseason = build_offseason_features(seasons)
     tg = build_team_games(schedules, team_stats, offseason)
     train_games = build_training_games(tg)
+
     diff_features = [f"diff_{f}" for f in FEATURES]
+    model_features = diff_features + WEATHER_MODEL_FEATURES
 
     if len(train_games) < 50:
         raise ValueError("Not enough completed games with rolling features to train the model.")
@@ -280,9 +336,13 @@ def train_model(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> ModelBundl
         ("logit", LogisticRegression(max_iter=2000, random_state=42)),
     ])
     older_weights = older["season"].map(SEASON_WEIGHTS).fillna(1.0).to_numpy()
-    validation_model.fit(older[diff_features], older["home_win"], logit__sample_weight=older_weights)
+    validation_model.fit(
+        older[model_features],
+        older["home_win"],
+        logit__sample_weight=older_weights,
+    )
 
-    val_prob = validation_model.predict_proba(newer[diff_features])[:, 1]
+    val_prob = validation_model.predict_proba(newer[model_features])[:, 1]
     val_pred = (val_prob >= 0.5).astype(int)
     val_accuracy = accuracy_score(newer["home_win"], val_pred)
     val_brier = brier_score_loss(newer["home_win"], val_prob)
@@ -292,7 +352,11 @@ def train_model(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> ModelBundl
         ("logit", LogisticRegression(max_iter=2000, random_state=42)),
     ])
     all_weights = train_games["season"].map(SEASON_WEIGHTS).fillna(1.0).to_numpy()
-    final_model.fit(train_games[diff_features], train_games["home_win"], logit__sample_weight=all_weights)
+    final_model.fit(
+        train_games[model_features],
+        train_games["home_win"],
+        logit__sample_weight=all_weights,
+    )
 
     return ModelBundle(
         model=final_model,
@@ -332,25 +396,47 @@ def _latest_snapshot(bundle: ModelBundle, team: str, is_home: int) -> dict:
     for feature in OFFSEASON_FEATURES:
         snapshot[feature] = offseason.get(feature, OFFSEASON_DEFAULTS[feature])
 
+    latest = history.iloc[-1]
+    for feature in WEATHER_TEAM_FEATURES:
+        snapshot[feature] = float(latest.get(feature, 0.0))
+
     return snapshot
 
 
-def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
+def predict_matchup(
+    bundle: ModelBundle,
+    away_team: str,
+    home_team: str,
+    weather: dict | None = None,
+):
     if away_team == home_team:
         raise ValueError("Choose two different teams.")
 
     home = _latest_snapshot(bundle, home_team, is_home=1)
     away = _latest_snapshot(bundle, away_team, is_home=0)
 
-    home["opponent_strength"] = float(bundle.team_games[bundle.team_games["team"] == away_team]["win"].mean())
-    away["opponent_strength"] = float(bundle.team_games[bundle.team_games["team"] == home_team]["win"].mean())
+    home["opponent_strength"] = float(
+        bundle.team_games[bundle.team_games["team"] == away_team]["win"].mean()
+    )
+    away["opponent_strength"] = float(
+        bundle.team_games[bundle.team_games["team"] == home_team]["win"].mean()
+    )
 
     row = {f"diff_{f}": home[f] - away[f] for f in FEATURES}
+    row.update(model_weather_values(weather, home, away))
+
     diff_features = [f"diff_{f}" for f in FEATURES]
-    X = pd.DataFrame([row], columns=diff_features)
+    model_features = diff_features + WEATHER_MODEL_FEATURES
+    X = pd.DataFrame([row], columns=model_features)
 
     home_prob = float(bundle.model.predict_proba(X)[0, 1])
     away_prob = 1.0 - home_prob
+
+    baseline_row = row.copy()
+    for feature in WEATHER_MODEL_FEATURES:
+        baseline_row[feature] = 0.0
+    baseline_X = pd.DataFrame([baseline_row], columns=model_features)
+    baseline_home_prob = float(bundle.model.predict_proba(baseline_X)[0, 1])
 
     scaler = bundle.model.named_steps["scale"]
     logit = bundle.model.named_steps["logit"]
@@ -358,15 +444,24 @@ def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
     coefs = logit.coef_[0]
 
     contributions = []
-    for feature, value, contribution in zip(FEATURES, X.iloc[0], scaled * coefs):
+    for feature, value, contribution in zip(model_features, X.iloc[0], scaled * coefs):
+        if feature.startswith("diff_"):
+            original = feature[5:]
+            factor_name = DISPLAY_NAMES[original]
+            category = "Offseason" if original in OFFSEASON_FEATURES else "Performance"
+        else:
+            factor_name = WEATHER_DISPLAY_NAMES[feature]
+            category = "Weather"
+
         contributions.append({
-            "factor": DISPLAY_NAMES[feature],
+            "factor": factor_name,
             "raw_difference": float(value),
             "model_contribution": float(contribution),
             "leans": home_team if contribution >= 0 else away_team,
             "strength": abs(float(contribution)),
-            "category": "Offseason" if feature in OFFSEASON_FEATURES else "Performance",
+            "category": category,
         })
+
     contributions.sort(key=lambda x: x["strength"], reverse=True)
 
     return {
@@ -374,11 +469,15 @@ def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
         "home_team": home_team,
         "away_probability": away_prob,
         "home_probability": home_prob,
+        "baseline_home_probability": baseline_home_prob,
+        "baseline_away_probability": 1.0 - baseline_home_prob,
+        "weather_delta_home": home_prob - baseline_home_prob,
         "predicted_winner": home_team if home_prob >= 0.5 else away_team,
         "confidence": max(home_prob, away_prob),
         "factors": contributions,
         "home_snapshot": home,
         "away_snapshot": away,
+        "weather": weather or {},
     }
 
 
@@ -399,5 +498,9 @@ def upcoming_games(schedules: pd.DataFrame, limit: int = 16):
         future["gameday"] = pd.to_datetime(future["gameday"], errors="coerce")
         future = future.sort_values(["gameday", "game_id"])
 
-    keep = [c for c in ["season", "week", "gameday", "away_team", "home_team"] if c in future.columns]
+    keep = [
+        c for c in
+        ["season", "week", "gameday", "gametime", "away_team", "home_team", "roof", "stadium"]
+        if c in future.columns
+    ]
     return future[keep].head(limit).reset_index(drop=True)
