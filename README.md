@@ -84,7 +84,7 @@ The access layer uses:
 
 Create a Supabase project, open its SQL editor, and run `setup_access.sql` from this repository.
 
-The table has no public RLS policies. The app uses a Supabase server-side Secret key in Streamlit Secrets.
+The table has no public RLS policies. The app uses a Supabase server-side Secret key in Streamlit Secrets. The setup SQL also grants the `service_role` database role access to `app_users`, which is required when Supabase's automatic table exposure is disabled.
 
 ### 2. Configure Auth0 email sign-in
 
