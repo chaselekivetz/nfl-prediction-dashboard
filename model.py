@@ -500,7 +500,7 @@ def upcoming_games(schedules: pd.DataFrame, limit: int = 16):
 
     keep = [
         c for c in
-        ["season", "week", "gameday", "gametime", "away_team", "home_team", "roof", "stadium"]
+        ["season", "week", "gameday", "gametime", "away_team", "home_team", "roof", "stadium", "location"]
         if c in future.columns
     ]
     return future[keep].head(limit).reset_index(drop=True)
