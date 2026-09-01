@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import re
 import sqlite3
 from zoneinfo import ZoneInfo
 
@@ -71,6 +72,21 @@ def _connect():
             favorite_team TEXT,
             updated_at TEXT NOT NULL
         )
+        """
+    )
+
+    preference_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(preferences)").fetchall()
+    }
+    if "username" not in preference_columns:
+        conn.execute("ALTER TABLE preferences ADD COLUMN username TEXT")
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_preferences_username_nocase
+        ON preferences(username COLLATE NOCASE)
+        WHERE username IS NOT NULL AND username <> ''
         """
     )
     conn.commit()
@@ -215,6 +231,81 @@ def favorite_team(email):
             (email,),
         ).fetchone()
     return row["favorite_team"] if row else None
+
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
+
+
+def profile_username(email):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT username FROM preferences WHERE email=?",
+            (email,),
+        ).fetchone()
+    if not row:
+        return None
+    username = str(row["username"] or "").strip()
+    return username or None
+
+
+def player_display_name(email, fallback=None):
+    username = profile_username(email)
+    if username:
+        return username
+    fallback = str(fallback or "").strip()
+    if fallback and "@" not in fallback:
+        return fallback
+    return str(email).split("@")[0]
+
+
+def save_username(email, display_name, username):
+    username = str(username or "").strip()
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError(
+            "Username must be 3–20 characters using only letters, numbers, or underscores."
+        )
+
+    with _connect() as conn:
+        existing = conn.execute(
+            """
+            SELECT email FROM preferences
+            WHERE username = ? COLLATE NOCASE AND email <> ?
+            LIMIT 1
+            """,
+            (username, email),
+        ).fetchone()
+        if existing:
+            raise ValueError("That username is already taken.")
+
+        conn.execute(
+            """
+            INSERT INTO preferences
+            (email, display_name, username, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                display_name=excluded.display_name,
+                username=excluded.username,
+                updated_at=excluded.updated_at
+            """,
+            (
+                email,
+                display_name,
+                username,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+
+        conn.execute(
+            "UPDATE winner_picks SET display_name=? WHERE email=?",
+            (username, email),
+        )
+        conn.execute(
+            "UPDATE stat_predictions SET display_name=? WHERE email=?",
+            (username, email),
+        )
+        conn.commit()
+
+    return username
 
 
 def load_skill_roster(season: int) -> pd.DataFrame:
@@ -515,7 +606,7 @@ def leaderboard(schedules, player_stats):
         score = user_score(row["email"], schedules, player_stats)
         rows.append(
             {
-                "Player": row["display_name"] or row["email"].split("@")[0],
+                "Player": player_display_name(row["email"], row["display_name"]),
                 "Points": score["total"],
                 "Winner picks": score["winner_points"],
                 "Stat challenges": score["stat_points"],
