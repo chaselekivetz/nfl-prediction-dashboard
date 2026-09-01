@@ -107,3 +107,45 @@ def league_map_frame(team_names: dict) -> pd.DataFrame:
             "lon": lon,
         })
     return pd.DataFrame(rows)
+
+
+def regular_season_weeks(schedules: pd.DataFrame, season: int) -> list[int]:
+    s = schedules.copy()
+    s = s[pd.to_numeric(s["season"], errors="coerce") == int(season)].copy()
+    if "game_type" in s.columns:
+        s = s[s["game_type"] == "REG"].copy()
+
+    weeks = pd.to_numeric(s.get("week"), errors="coerce").dropna().astype(int)
+    return sorted(week for week in weeks.unique().tolist() if week >= 1)
+
+
+def week_is_complete(schedules: pd.DataFrame, season: int, week: int) -> bool:
+    games = games_for_week(schedules, season, week)
+    if "game_type" in games.columns:
+        games = games[games["game_type"] == "REG"].copy()
+    if games.empty:
+        return False
+
+    home = pd.to_numeric(games.get("home_score"), errors="coerce")
+    away = pd.to_numeric(games.get("away_score"), errors="coerce")
+    return bool(home.notna().all() and away.notna().all())
+
+
+def challenge_active_week(schedules: pd.DataFrame, season: int) -> int:
+    weeks = regular_season_weeks(schedules, season)
+    if not weeks:
+        return 1
+
+    for week in weeks:
+        if not week_is_complete(schedules, season, week):
+            return week
+
+    return weeks[-1]
+
+
+def completed_challenge_weeks(schedules: pd.DataFrame, season: int) -> list[int]:
+    return [
+        week
+        for week in regular_season_weeks(schedules, season)
+        if week_is_complete(schedules, season, week)
+    ]
