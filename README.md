@@ -67,3 +67,73 @@ walk-forward backtest.
 
 This project is for sports analytics and machine-learning practice. Win probabilities
 are uncertain estimates and are not wagering recommendations.
+
+
+## Private access and invitations
+
+The dashboard now **fails closed**: it stops before loading NFL data unless OIDC authentication is configured and the signed-in email is authorized.
+
+The access layer uses:
+
+- **Google OpenID Connect** through Streamlit `st.login()` to identify the user.
+- **Supabase** for the persistent invite/allowlist table.
+- **Resend** for invitation emails.
+- **Streamlit Secrets** for every credential. Do not commit real secrets to GitHub.
+
+### 1. Create the allowlist table
+
+Create a Supabase project, open its SQL editor, and run `setup_access.sql` from this repository.
+
+The table has no public RLS policies. The app uses the Supabase service-role key on the server side.
+
+### 2. Configure Google sign-in
+
+Create a Google OAuth/OIDC web client and add this authorized redirect URI:
+
+```
+https://YOUR-APP.streamlit.app/oauth2callback
+```
+
+Google's OIDC metadata URL is:
+
+```
+https://accounts.google.com/.well-known/openid-configuration
+```
+
+### 3. Configure Streamlit Secrets
+
+Open the deployed app's **Settings → Secrets** and copy the structure from:
+
+```
+.streamlit/secrets.example.toml
+```
+
+Replace every placeholder with the real value. The email in `admin_emails` is the administrator account that can always enter the app and manage invitations.
+
+Generate a long random `cookie_secret`. Keep the Google client secret, Supabase service-role key, and Resend API key only in Streamlit Secrets.
+
+### 4. Configure invitation email
+
+Create a Resend sending API key and verified sender/domain, then fill in:
+
+- `resend_api_key`
+- `from_email`
+- `app_url`
+
+If Resend is not configured yet, the admin can still approve an email; the app will show the URL so it can be shared manually.
+
+### 5. Invite users
+
+After signing in as an administrator, open **Admin access** in the sidebar.
+
+Enter an email and click **Approve & send invite**. The user is written to the persistent allowlist and receives the dashboard link. They must sign in with the same approved email.
+
+The administrator can also revoke an invited user from the same panel.
+
+### Security behavior
+
+- An unauthenticated visitor sees only the sign-in screen.
+- An authenticated but unapproved account sees only an access-denied screen.
+- NFL schedules, model training, predictions, and offseason data are not loaded until authorization succeeds.
+- Database or authorization-check failures deny access rather than allowing it.
+- Real secrets are excluded from Git with `.gitignore`.
