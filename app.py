@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 
+from access_control import require_access, render_access_sidebar
+
 from model import (
     FEATURES,
     DISPLAY_NAMES,
@@ -121,6 +123,9 @@ st.set_page_config(
     page_icon="🏈",
     layout="wide",
 )
+
+current_user = require_access()
+render_access_sidebar(current_user)
 
 st.markdown(
     """
