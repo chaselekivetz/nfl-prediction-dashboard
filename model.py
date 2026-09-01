@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-import numpy as np
 import pandas as pd
 import nflreadpy as nfl
 from sklearn.linear_model import LogisticRegression
@@ -11,8 +10,15 @@ from sklearn.metrics import accuracy_score, brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from offseason import (
+    OFFSEASON_DISPLAY_NAMES,
+    OFFSEASON_FEATURES,
+    build_offseason_features,
+    team_offseason_snapshot,
+)
 
-FEATURES = [
+
+BASE_FEATURES = [
     "point_diff_form",
     "offense_points_form",
     "defense_points_form",
@@ -24,6 +30,8 @@ FEATURES = [
     "opponent_strength",
 ]
 
+FEATURES = BASE_FEATURES + OFFSEASON_FEATURES
+
 DISPLAY_NAMES = {
     "point_diff_form": "Recent point differential",
     "offense_points_form": "Recent scoring",
@@ -34,6 +42,7 @@ DISPLAY_NAMES = {
     "recent_win_pct": "Last-5 win rate",
     "location_win_pct": "Home/away performance",
     "opponent_strength": "Opponent strength",
+    **OFFSEASON_DISPLAY_NAMES,
 }
 
 SEASON_WEIGHTS = {
@@ -43,6 +52,16 @@ SEASON_WEIGHTS = {
     2026: 1.00,
 }
 
+OFFSEASON_DEFAULTS = {
+    "roster_continuity": 0.65,
+    "addition_weight": 0.25,
+    "departure_weight": 0.25,
+    "draft_impact": 1.0,
+    "qb_returning": 0.5,
+    "trade_additions": 0.0,
+    "trade_departures": 0.0,
+}
+
 
 @dataclass
 class ModelBundle:
@@ -50,12 +69,12 @@ class ModelBundle:
     training_games: pd.DataFrame
     team_games: pd.DataFrame
     schedules: pd.DataFrame
+    offseason: pd.DataFrame
     validation_accuracy: float | None
     validation_brier: float | None
 
 
 def _to_pandas(frame):
-    """Convert nflreadpy's Polars output to pandas without assuming a version."""
     if isinstance(frame, pd.DataFrame):
         return frame.copy()
     if hasattr(frame, "to_pandas"):
@@ -65,29 +84,20 @@ def _to_pandas(frame):
 
 def load_nfl_data(seasons: Iterable[int] = (2023, 2024, 2025, 2026)):
     seasons = list(seasons)
-
-    # Schedule files are usually published before weekly team-stat files.
-    # Load the full requested schedule range so upcoming 2026 games can appear.
     schedules = _to_pandas(nfl.load_schedules(seasons))
 
-    # Load team stats one season at a time. If the newest season has not been
-    # published yet (for example, before Week 1), skip it instead of crashing.
     stat_frames = []
     unavailable_seasons = []
     for season in seasons:
         try:
-            frame = _to_pandas(
-                nfl.load_team_stats([season], summary_level="week")
-            )
+            frame = _to_pandas(nfl.load_team_stats([season], summary_level="week"))
             if not frame.empty:
                 stat_frames.append(frame)
         except Exception:
             unavailable_seasons.append(season)
 
     if not stat_frames:
-        raise ValueError(
-            "No NFL weekly team-stat files were available for the requested seasons."
-        )
+        raise ValueError("No NFL weekly team-stat files were available for the requested seasons.")
 
     team_stats = pd.concat(stat_frames, ignore_index=True, sort=False)
     team_stats.attrs["unavailable_seasons"] = unavailable_seasons
@@ -115,7 +125,6 @@ def _sum_existing(df: pd.DataFrame, names):
 
 def normalize_team_stats(team_stats: pd.DataFrame) -> pd.DataFrame:
     stats = team_stats.copy()
-
     if "season_type" in stats.columns:
         stats = stats[stats["season_type"].isin(["REG", "POST"])].copy()
 
@@ -124,41 +133,26 @@ def normalize_team_stats(team_stats: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Team-stat data is missing required columns: {sorted(missing)}")
 
-    stats["yards_for"] = (
-        _first_existing(stats, ["passing_yards"])
-        + _first_existing(stats, ["rushing_yards"])
+    stats["yards_for"] = _first_existing(stats, ["passing_yards"]) + _first_existing(stats, ["rushing_yards"])
+    stats["turnovers_lost"] = _first_existing(stats, ["passing_interceptions"]) + _sum_existing(
+        stats,
+        [
+            "rushing_fumbles_lost",
+            "receiving_fumbles_lost",
+            "sack_fumbles_lost",
+            "special_teams_fumbles_lost",
+        ],
     )
 
-    # Offensive giveaways. The exact available fumble fields can vary by dataset release,
-    # so the program only uses fields that actually exist.
-    stats["turnovers_lost"] = (
-        _first_existing(stats, ["passing_interceptions"])
-        + _sum_existing(
-            stats,
-            [
-                "rushing_fumbles_lost",
-                "receiving_fumbles_lost",
-                "sack_fumbles_lost",
-                "special_teams_fumbles_lost",
-            ],
-        )
-    )
-
-    keep = ["game_id", "team", "yards_for", "turnovers_lost"]
-    return stats[keep].drop_duplicates(["game_id", "team"])
+    return stats[["game_id", "team", "yards_for", "turnovers_lost"]].drop_duplicates(["game_id", "team"])
 
 
 def completed_games(schedules: pd.DataFrame) -> pd.DataFrame:
     s = schedules.copy()
-
-    # nflverse schedule files use game_type; exclude preseason.
     if "game_type" in s.columns:
         s = s[s["game_type"] != "PRE"].copy()
 
-    required = {
-        "game_id", "season", "week", "home_team", "away_team",
-        "home_score", "away_score"
-    }
+    required = {"game_id", "season", "week", "home_team", "away_team", "home_score", "away_score"}
     missing = required - set(s.columns)
     if missing:
         raise ValueError(f"Schedule data is missing required columns: {sorted(missing)}")
@@ -170,63 +164,44 @@ def completed_games(schedules: pd.DataFrame) -> pd.DataFrame:
     if "gameday" in s.columns:
         s["gameday"] = pd.to_datetime(s["gameday"], errors="coerce")
     else:
-        # Keeps sorting deterministic if a release omits gameday.
-        s["gameday"] = pd.to_datetime(
-            s["season"].astype(str) + "-01-01", errors="coerce"
-        ) + pd.to_timedelta(pd.to_numeric(s["week"], errors="coerce").fillna(0) * 7, unit="D")
+        s["gameday"] = pd.to_datetime(s["season"].astype(str) + "-01-01", errors="coerce") + pd.to_timedelta(
+            pd.to_numeric(s["week"], errors="coerce").fillna(0) * 7, unit="D"
+        )
 
     return s.sort_values(["gameday", "game_id"]).reset_index(drop=True)
 
 
-def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd.DataFrame:
+def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame, offseason: pd.DataFrame) -> pd.DataFrame:
     games = completed_games(schedules)
     stats = normalize_team_stats(team_stats)
 
-    home = games[
-        ["game_id", "season", "week", "gameday", "home_team", "away_team",
-         "home_score", "away_score"]
-    ].copy()
-    home = home.rename(
-        columns={
-            "home_team": "team",
-            "away_team": "opponent",
-            "home_score": "points_for",
-            "away_score": "points_against",
-        }
-    )
+    home = games[["game_id", "season", "week", "gameday", "home_team", "away_team", "home_score", "away_score"]].copy()
+    home = home.rename(columns={
+        "home_team": "team", "away_team": "opponent",
+        "home_score": "points_for", "away_score": "points_against",
+    })
     home["is_home"] = 1
 
-    away = games[
-        ["game_id", "season", "week", "gameday", "home_team", "away_team",
-         "home_score", "away_score"]
-    ].copy()
-    away = away.rename(
-        columns={
-            "away_team": "team",
-            "home_team": "opponent",
-            "away_score": "points_for",
-            "home_score": "points_against",
-        }
-    )
+    away = games[["game_id", "season", "week", "gameday", "home_team", "away_team", "home_score", "away_score"]].copy()
+    away = away.rename(columns={
+        "away_team": "team", "home_team": "opponent",
+        "away_score": "points_for", "home_score": "points_against",
+    })
     away["is_home"] = 0
 
     tg = pd.concat([home, away], ignore_index=True)
     tg["win"] = (tg["points_for"] > tg["points_against"]).astype(int)
     tg["point_diff"] = tg["points_for"] - tg["points_against"]
-
     tg = tg.merge(stats, on=["game_id", "team"], how="left")
 
-    opp_stats = stats.rename(
-        columns={
-            "team": "opponent",
-            "yards_for": "yards_allowed",
-            "turnovers_lost": "opponent_turnovers_lost",
-        }
-    )
+    opp_stats = stats.rename(columns={
+        "team": "opponent",
+        "yards_for": "yards_allowed",
+        "turnovers_lost": "opponent_turnovers_lost",
+    })
     tg = tg.merge(
         opp_stats[["game_id", "opponent", "yards_allowed", "opponent_turnovers_lost"]],
-        on=["game_id", "opponent"],
-        how="left",
+        on=["game_id", "opponent"], how="left"
     )
 
     tg["yards_for"] = tg["yards_for"].fillna(0.0)
@@ -235,54 +210,35 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd.Da
     tg["opponent_turnovers_lost"] = tg["opponent_turnovers_lost"].fillna(0.0)
     tg["turnover_margin"] = tg["opponent_turnovers_lost"] - tg["turnovers_lost"]
 
+    if not offseason.empty:
+        tg = tg.merge(offseason[["season", "team"] + OFFSEASON_FEATURES], on=["season", "team"], how="left")
+    for feature in OFFSEASON_FEATURES:
+        if feature not in tg.columns:
+            tg[feature] = OFFSEASON_DEFAULTS[feature]
+        tg[feature] = pd.to_numeric(tg[feature], errors="coerce").fillna(OFFSEASON_DEFAULTS[feature])
+
     tg = tg.sort_values(["gameday", "game_id", "team"]).reset_index(drop=True)
 
-    # Pregame rolling features: shift(1) guarantees the current game's result is excluded.
-    def rolling_prior(series, window, min_periods=1):
-        return series.shift(1).rolling(window, min_periods=min_periods).mean()
+    def rolling_prior(series, window):
+        return series.shift(1).rolling(window, min_periods=1).mean()
 
     grouped = tg.groupby("team", group_keys=False)
-
-    tg["point_diff_form"] = grouped["point_diff"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["offense_points_form"] = grouped["points_for"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["defense_points_form"] = grouped["points_against"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["yards_for_form"] = grouped["yards_for"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["yards_allowed_form"] = grouped["yards_allowed"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["turnover_margin_form"] = grouped["turnover_margin"].transform(
-        lambda x: rolling_prior(x, 8)
-    )
-    tg["recent_win_pct"] = grouped["win"].transform(
-        lambda x: rolling_prior(x, 5)
-    )
-
-    # Prior season-to-date win percentage, used for opponent strength.
-    tg["prior_win_pct"] = grouped["win"].transform(
-        lambda x: x.shift(1).expanding(min_periods=1).mean()
-    )
-
-    # Location-specific performance (home history for a home prediction,
-    # away history for an away prediction).
-    tg["location_win_pct"] = (
-        tg.groupby(["team", "is_home"])["win"]
-        .transform(lambda x: x.shift(1).rolling(12, min_periods=1).mean())
+    tg["point_diff_form"] = grouped["point_diff"].transform(lambda x: rolling_prior(x, 8))
+    tg["offense_points_form"] = grouped["points_for"].transform(lambda x: rolling_prior(x, 8))
+    tg["defense_points_form"] = grouped["points_against"].transform(lambda x: rolling_prior(x, 8))
+    tg["yards_for_form"] = grouped["yards_for"].transform(lambda x: rolling_prior(x, 8))
+    tg["yards_allowed_form"] = grouped["yards_allowed"].transform(lambda x: rolling_prior(x, 8))
+    tg["turnover_margin_form"] = grouped["turnover_margin"].transform(lambda x: rolling_prior(x, 8))
+    tg["recent_win_pct"] = grouped["win"].transform(lambda x: rolling_prior(x, 5))
+    tg["prior_win_pct"] = grouped["win"].transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
+    tg["location_win_pct"] = tg.groupby(["team", "is_home"])["win"].transform(
+        lambda x: x.shift(1).rolling(12, min_periods=1).mean()
     )
 
     opp_strength = tg[["game_id", "team", "prior_win_pct"]].rename(
         columns={"team": "opponent", "prior_win_pct": "opponent_strength"}
     )
-    tg = tg.merge(opp_strength, on=["game_id", "opponent"], how="left")
-
-    return tg
+    return tg.merge(opp_strength, on=["game_id", "opponent"], how="left")
 
 
 def build_training_games(team_games: pd.DataFrame) -> pd.DataFrame:
@@ -292,15 +248,12 @@ def build_training_games(team_games: pd.DataFrame) -> pd.DataFrame:
     home_cols = ["game_id", "season", "week", "gameday", "team", "opponent", "win"] + FEATURES
     away_cols = ["game_id", "team"] + FEATURES
 
-    home = home[home_cols].rename(
-        columns={"team": "home_team", "opponent": "away_team", "win": "home_win"}
-    )
+    home = home[home_cols].rename(columns={"team": "home_team", "opponent": "away_team", "win": "home_win"})
     away = away[away_cols].rename(columns={"team": "away_team"})
-
     merged = home.merge(away, on=["game_id", "away_team"], suffixes=("_home", "_away"))
 
-    for f in FEATURES:
-        merged[f"diff_{f}"] = merged[f"{f}_home"] - merged[f"{f}_away"]
+    for feature in FEATURES:
+        merged[f"diff_{feature}"] = merged[f"{feature}_home"] - merged[f"{feature}_away"]
 
     diff_features = [f"diff_{f}" for f in FEATURES]
     merged = merged.dropna(subset=diff_features + ["home_win"]).copy()
@@ -308,77 +261,61 @@ def build_training_games(team_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def train_model(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> ModelBundle:
-    tg = build_team_games(schedules, team_stats)
+    seasons = sorted(pd.to_numeric(schedules["season"], errors="coerce").dropna().astype(int).unique().tolist())
+    offseason = build_offseason_features(seasons)
+    tg = build_team_games(schedules, team_stats, offseason)
     train_games = build_training_games(tg)
     diff_features = [f"diff_{f}" for f in FEATURES]
 
     if len(train_games) < 50:
-        raise ValueError(
-            "Not enough completed games with rolling features to train the model."
-        )
+        raise ValueError("Not enough completed games with rolling features to train the model.")
 
-    # Chronological holdout: the newest 20% is never used for fitting the validation model.
     split = max(1, int(len(train_games) * 0.80))
     split = min(split, len(train_games) - 1)
-
     older = train_games.iloc[:split].copy()
     newer = train_games.iloc[split:].copy()
 
-    validation_model = Pipeline(
-        [
-            ("scale", StandardScaler()),
-            ("logit", LogisticRegression(max_iter=2000, random_state=42)),
-        ]
-    )
-
+    validation_model = Pipeline([
+        ("scale", StandardScaler()),
+        ("logit", LogisticRegression(max_iter=2000, random_state=42)),
+    ])
     older_weights = older["season"].map(SEASON_WEIGHTS).fillna(1.0).to_numpy()
-    validation_model.fit(
-        older[diff_features],
-        older["home_win"],
-        logit__sample_weight=older_weights,
-    )
+    validation_model.fit(older[diff_features], older["home_win"], logit__sample_weight=older_weights)
 
     val_prob = validation_model.predict_proba(newer[diff_features])[:, 1]
     val_pred = (val_prob >= 0.5).astype(int)
-
     val_accuracy = accuracy_score(newer["home_win"], val_pred)
     val_brier = brier_score_loss(newer["home_win"], val_prob)
 
-    final_model = Pipeline(
-        [
-            ("scale", StandardScaler()),
-            ("logit", LogisticRegression(max_iter=2000, random_state=42)),
-        ]
-    )
+    final_model = Pipeline([
+        ("scale", StandardScaler()),
+        ("logit", LogisticRegression(max_iter=2000, random_state=42)),
+    ])
     all_weights = train_games["season"].map(SEASON_WEIGHTS).fillna(1.0).to_numpy()
-    final_model.fit(
-        train_games[diff_features],
-        train_games["home_win"],
-        logit__sample_weight=all_weights,
-    )
+    final_model.fit(train_games[diff_features], train_games["home_win"], logit__sample_weight=all_weights)
 
     return ModelBundle(
         model=final_model,
         training_games=train_games,
         team_games=tg,
         schedules=schedules,
+        offseason=offseason,
         validation_accuracy=float(val_accuracy),
         validation_brier=float(val_brier),
     )
 
 
-def _latest_snapshot(team_games: pd.DataFrame, team: str, is_home: int) -> dict:
-    history = team_games[team_games["team"] == team].sort_values(["gameday", "game_id"])
+def _latest_snapshot(bundle: ModelBundle, team: str, is_home: int) -> dict:
+    history = bundle.team_games[bundle.team_games["team"] == team].sort_values(["gameday", "game_id"])
     if history.empty:
         raise ValueError(f"No completed-game history found for {team}.")
 
     last8 = history.tail(8)
     last5 = history.tail(5)
     loc = history[history["is_home"] == is_home].tail(12)
-
     current_win_pct = float(history["win"].mean())
 
-    return {
+    snapshot = {
         "point_diff_form": float(last8["point_diff"].mean()),
         "offense_points_form": float(last8["points_for"].mean()),
         "defense_points_form": float(last8["points_against"].mean()),
@@ -387,32 +324,31 @@ def _latest_snapshot(team_games: pd.DataFrame, team: str, is_home: int) -> dict:
         "turnover_margin_form": float(last8["turnover_margin"].mean()),
         "recent_win_pct": float(last5["win"].mean()),
         "location_win_pct": float(loc["win"].mean()) if not loc.empty else current_win_pct,
-        # For an upcoming game, opponent strength is the opponent's current historical win rate.
         "opponent_strength": current_win_pct,
     }
+
+    current_season = int(pd.to_numeric(bundle.schedules["season"], errors="coerce").max())
+    offseason = team_offseason_snapshot(bundle.offseason, team, current_season)
+    for feature in OFFSEASON_FEATURES:
+        snapshot[feature] = offseason.get(feature, OFFSEASON_DEFAULTS[feature])
+
+    return snapshot
 
 
 def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
     if away_team == home_team:
         raise ValueError("Choose two different teams.")
 
-    home = _latest_snapshot(bundle.team_games, home_team, is_home=1)
-    away = _latest_snapshot(bundle.team_games, away_team, is_home=0)
+    home = _latest_snapshot(bundle, home_team, is_home=1)
+    away = _latest_snapshot(bundle, away_team, is_home=0)
 
-    # Each side's opponent strength should describe the team it is about to face.
-    home["opponent_strength"] = float(
-        bundle.team_games[bundle.team_games["team"] == away_team]["win"].mean()
-    )
-    away["opponent_strength"] = float(
-        bundle.team_games[bundle.team_games["team"] == home_team]["win"].mean()
-    )
+    home["opponent_strength"] = float(bundle.team_games[bundle.team_games["team"] == away_team]["win"].mean())
+    away["opponent_strength"] = float(bundle.team_games[bundle.team_games["team"] == home_team]["win"].mean())
 
-    row = {}
-    for f in FEATURES:
-        row[f"diff_{f}"] = home[f] - away[f]
-
+    row = {f"diff_{f}": home[f] - away[f] for f in FEATURES}
     diff_features = [f"diff_{f}" for f in FEATURES]
     X = pd.DataFrame([row], columns=diff_features)
+
     home_prob = float(bundle.model.predict_proba(X)[0, 1])
     away_prob = 1.0 - home_prob
 
@@ -423,16 +359,14 @@ def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
 
     contributions = []
     for feature, value, contribution in zip(FEATURES, X.iloc[0], scaled * coefs):
-        contributions.append(
-            {
-                "factor": DISPLAY_NAMES[feature],
-                "raw_difference": float(value),
-                "model_contribution": float(contribution),
-                "leans": home_team if contribution >= 0 else away_team,
-                "strength": abs(float(contribution)),
-            }
-        )
-
+        contributions.append({
+            "factor": DISPLAY_NAMES[feature],
+            "raw_difference": float(value),
+            "model_contribution": float(contribution),
+            "leans": home_team if contribution >= 0 else away_team,
+            "strength": abs(float(contribution)),
+            "category": "Offseason" if feature in OFFSEASON_FEATURES else "Performance",
+        })
     contributions.sort(key=lambda x: x["strength"], reverse=True)
 
     return {
