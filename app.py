@@ -16,6 +16,8 @@ from model import (
 )
 from offseason import OFFSEASON_FEATURES, OFFSEASON_DISPLAY_NAMES
 
+MODEL_CACHE_VERSION = "weather-schema-v1"
+
 
 TEAM_NAMES = {
     "ARI": "Arizona Cardinals",
@@ -272,7 +274,7 @@ def get_data():
 
 
 @st.cache_resource(show_spinner=False)
-def get_model(_schedules, _team_stats, data_signature):
+def get_model(_schedules, _team_stats, data_signature, model_cache_version):
     return train_model(_schedules, _team_stats)
 
 
@@ -309,7 +311,12 @@ try:
             if completed_mask.any()
             else "none",
         )
-        bundle = get_model(schedules, team_stats, signature)
+        bundle = get_model(
+            schedules,
+            team_stats,
+            signature,
+            MODEL_CACHE_VERSION,
+        )
 
 except Exception as exc:
     st.error("The dashboard could not load or train the NFL model.")
