@@ -491,7 +491,7 @@ if not app_username:
 
     if create_username:
         try:
-            save_username(current_user.email, app_username, new_username)
+            save_username(current_user.email, current_user.name, new_username)
             st.success("Username created.")
             st.rerun()
         except ValueError as exc:
@@ -500,7 +500,7 @@ if not app_username:
     st.info("Your email stays private and is only used for sign-in and account access.")
     st.stop()
 
-app_username = player_display_name(current_user.email, app_username)
+app_username = player_display_name(current_user.email, current_user.name)
 
 st.markdown(
     """
