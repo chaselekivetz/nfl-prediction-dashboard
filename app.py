@@ -408,10 +408,28 @@ with tab_predict:
 with tab_upcoming:
     st.subheader("Upcoming schedule")
     st.caption("Kickoff times are shown in Eastern Time.")
-    upcoming = upcoming_games(bundle.schedules, 20)
+
+    upcoming = upcoming_games(bundle.schedules, 300)
+
+    week_options = ["All Weeks"] + [f"Week {week}" for week in range(1, 17)]
+    selected_week = st.selectbox(
+        "Filter by week",
+        week_options,
+        index=1,
+        key="upcoming_week_filter",
+    )
+
+    if selected_week != "All Weeks" and not upcoming.empty:
+        week_number = int(selected_week.split()[-1])
+        upcoming = upcoming[
+            pd.to_numeric(upcoming["week"], errors="coerce") == week_number
+        ].copy()
 
     if upcoming.empty:
-        st.info("No upcoming non-preseason games were found in the current schedule file.")
+        if selected_week == "All Weeks":
+            st.info("No upcoming non-preseason games were found in the current schedule file.")
+        else:
+            st.info(f"No upcoming games were found for {selected_week}.")
     else:
         for _, game in upcoming.iterrows():
             away_team = clean_text(game.get("away_team"))
