@@ -60,22 +60,30 @@ def _static_approved_emails() -> set[str]:
     return _email_list(_access_config().get("approved_emails", []))
 
 
+def _supabase_server_key() -> str:
+    access = _access_config()
+    return (
+        str(access.get("supabase_secret_key", "")).strip()
+        or str(access.get("supabase_service_role_key", "")).strip()
+    )
+
+
 def _database_is_configured() -> bool:
     access = _access_config()
     return bool(
         str(access.get("supabase_url", "")).strip()
-        and str(access.get("supabase_service_role_key", "")).strip()
+        and _supabase_server_key()
     )
 
 
 def _supabase_headers(prefer: str | None = None) -> dict[str, str]:
-    access = _access_config()
-    key = str(access.get("supabase_service_role_key", "")).strip()
+    key = _supabase_server_key()
     headers = {
         "apikey": key,
-        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {key}"
     if prefer:
         headers["Prefer"] = prefer
     return headers
