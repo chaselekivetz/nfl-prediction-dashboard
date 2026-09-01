@@ -577,22 +577,65 @@ with tab_home:
 
     stored_favorite = favorite_team(current_user.email)
     default_favorite = stored_favorite if stored_favorite in teams else (teams[0] if teams else None)
+    favorite = default_favorite
+
+    if "show_favorite_picker" not in st.session_state:
+        st.session_state["show_favorite_picker"] = False
 
     top_left, top_right = st.columns([2, 1])
     with top_left:
         st.markdown(f"### Welcome, {current_user.name}")
         st.caption("Your weekly NFL dashboard, prediction challenge, and team explorer.")
+
     with top_right:
-        if teams:
-            favorite = st.selectbox(
-                "Favorite team",
-                teams,
-                index=teams.index(default_favorite),
-                format_func=team_label,
-                key="home_favorite_team",
-            )
-            if favorite != stored_favorite:
-                set_favorite_team(current_user.email, current_user.name, favorite)
+        if teams and favorite:
+            st.markdown("**Favorite team**")
+            favorite_logo, favorite_name_col = st.columns([1, 2])
+            with favorite_logo:
+                st.image(team_logo_url(favorite), width=64)
+            with favorite_name_col:
+                st.markdown(f"**{team_name(favorite)}**")
+
+            if st.button(
+                "Change favorite team",
+                key="change_favorite_team_button",
+                use_container_width=True,
+            ):
+                st.session_state["show_favorite_picker"] = True
+
+            if st.session_state["show_favorite_picker"]:
+                selected_favorite = st.selectbox(
+                    "Choose your favorite team",
+                    teams,
+                    index=teams.index(favorite),
+                    format_func=team_label,
+                    key="favorite_team_picker",
+                )
+
+                save_col, cancel_col = st.columns(2)
+                with save_col:
+                    if st.button(
+                        "Save",
+                        type="primary",
+                        key="save_favorite_team",
+                        use_container_width=True,
+                    ):
+                        set_favorite_team(
+                            current_user.email,
+                            current_user.name,
+                            selected_favorite,
+                        )
+                        st.session_state["show_favorite_picker"] = False
+                        st.rerun()
+
+                with cancel_col:
+                    if st.button(
+                        "Cancel",
+                        key="cancel_favorite_team",
+                        use_container_width=True,
+                    ):
+                        st.session_state["show_favorite_picker"] = False
+                        st.rerun()
 
     weekly_upcoming = upcoming_games_for_week(schedules, current_season, active_week)
     featured_game, featured_result = game_of_week(bundle, weekly_upcoming)
