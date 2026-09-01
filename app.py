@@ -350,8 +350,7 @@ def render_team_upcoming(team, schedules, limit=5):
         opponent = away if home == team else home
         venue = format_game_location(game)
         st.markdown(
-            f"**{team_name(opponent)}** — {format_kickoff(game)}  
-"
+            f"**{team_name(opponent)}** — {format_kickoff(game)}  \\n"
             f"📍 {venue}"
         )
 
