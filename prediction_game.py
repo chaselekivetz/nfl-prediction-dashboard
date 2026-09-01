@@ -292,6 +292,32 @@ def _winner_for_game(row):
     return str(row.get("home_team")) if home > away else str(row.get("away_team"))
 
 
+def _week_games(schedules, season, week):
+    rows = schedules[
+        (pd.to_numeric(schedules.get("season"), errors="coerce") == int(season))
+        & (pd.to_numeric(schedules.get("week"), errors="coerce") == int(week))
+    ].copy()
+    if "game_type" in rows.columns:
+        rows = rows[rows["game_type"] == "REG"].copy()
+    return rows
+
+
+def _week_complete(schedules, season, week):
+    rows = _week_games(schedules, season, week)
+    if rows.empty:
+        return False
+    home = pd.to_numeric(rows.get("home_score"), errors="coerce")
+    away = pd.to_numeric(rows.get("away_score"), errors="coerce")
+    return bool(home.notna().all() and away.notna().all())
+
+
+def _stats_week_available(player_stats, week):
+    if player_stats.empty or "week" not in player_stats.columns:
+        return False
+    weeks = pd.to_numeric(player_stats["week"], errors="coerce")
+    return bool((weeks == int(week)).any())
+
+
 def _stat_points(stat_key, predicted, actual):
     diff = abs(float(predicted) - float(actual))
 
@@ -332,27 +358,44 @@ def _stat_points(stat_key, predicted, actual):
     return 0
 
 
-def user_score(email, schedules, player_stats):
-    winner_points = 0
-    stat_points = 0
-    settled_winners = 0
-    settled_stats = 0
+def weekly_user_score(email, schedules, player_stats, season, week):
+    if not _week_complete(schedules, season, week):
+        return {
+            "complete": False,
+            "total": 0,
+            "winner_points": 0,
+            "stat_points": 0,
+            "settled_winners": 0,
+            "settled_stats": 0,
+        }
 
+    week_schedule = _week_games(schedules, season, week)
     schedule_map = {
         str(row.get("game_id")): row
-        for _, row in schedules.iterrows()
+        for _, row in week_schedule.iterrows()
         if pd.notna(row.get("game_id"))
     }
 
     with _connect() as conn:
         winner_rows = conn.execute(
-            "SELECT * FROM winner_picks WHERE email=?",
-            (email,),
+            """
+            SELECT * FROM winner_picks
+            WHERE email=? AND season=? AND week=?
+            """,
+            (email, int(season), int(week)),
         ).fetchall()
         stat_rows = conn.execute(
-            "SELECT * FROM stat_predictions WHERE email=?",
-            (email,),
+            """
+            SELECT * FROM stat_predictions
+            WHERE email=? AND season=? AND week=?
+            """,
+            (email, int(season), int(week)),
         ).fetchall()
+
+    winner_points = 0
+    stat_points = 0
+    settled_winners = 0
+    settled_stats = 0
 
     for pick in winner_rows:
         game = schedule_map.get(str(pick["game_id"]))
@@ -365,23 +408,26 @@ def user_score(email, schedules, player_stats):
         if str(pick["pick_team"]) == winner:
             winner_points += 10
 
-    for pick in stat_rows:
-        actual = _actual_stat(
-            player_stats,
-            pick["player_id"],
-            pick["week"],
-            pick["stat_key"],
-        )
-        if actual is None:
-            continue
-        settled_stats += 1
-        stat_points += _stat_points(
-            pick["stat_key"],
-            pick["predicted_value"],
-            actual,
-        )
+    stats_ready = _stats_week_available(player_stats, week)
+    if stats_ready:
+        for pick in stat_rows:
+            actual = _actual_stat(
+                player_stats,
+                pick["player_id"],
+                week,
+                pick["stat_key"],
+            )
+            if actual is None:
+                actual = 0.0
+            settled_stats += 1
+            stat_points += _stat_points(
+                pick["stat_key"],
+                pick["predicted_value"],
+                actual,
+            )
 
     return {
+        "complete": True,
         "total": int(winner_points + stat_points),
         "winner_points": int(winner_points),
         "stat_points": int(stat_points),
@@ -389,6 +435,64 @@ def user_score(email, schedules, player_stats):
         "settled_stats": int(settled_stats),
     }
 
+
+def user_score(email, schedules, player_stats):
+    if schedules.empty:
+        return {
+            "total": 0,
+            "winner_points": 0,
+            "stat_points": 0,
+            "settled_winners": 0,
+            "settled_stats": 0,
+        }
+
+    seasons = pd.to_numeric(schedules.get("season"), errors="coerce").dropna()
+    if seasons.empty:
+        return {
+            "total": 0,
+            "winner_points": 0,
+            "stat_points": 0,
+            "settled_winners": 0,
+            "settled_stats": 0,
+        }
+
+    season = int(seasons.max())
+    season_rows = schedules[
+        pd.to_numeric(schedules.get("season"), errors="coerce") == season
+    ].copy()
+    if "game_type" in season_rows.columns:
+        season_rows = season_rows[season_rows["game_type"] == "REG"].copy()
+
+    weeks = sorted(
+        pd.to_numeric(season_rows.get("week"), errors="coerce")
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+
+    total = {
+        "total": 0,
+        "winner_points": 0,
+        "stat_points": 0,
+        "settled_winners": 0,
+        "settled_stats": 0,
+    }
+
+    for week in weeks:
+        weekly = weekly_user_score(
+            email,
+            schedules,
+            player_stats,
+            season,
+            week,
+        )
+        if not weekly["complete"]:
+            continue
+        for key in total:
+            total[key] += int(weekly[key])
+
+    return total
 
 def leaderboard(schedules, player_stats):
     with _connect() as conn:
