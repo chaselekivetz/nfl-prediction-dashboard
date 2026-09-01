@@ -75,7 +75,7 @@ The dashboard now **fails closed**: it stops before loading NFL data unless OIDC
 
 The access layer uses:
 
-- **Google OpenID Connect** through Streamlit `st.login()` to identify the user.
+- **OpenID Connect** through Streamlit `st.login()` to identify the user. Auth0 email sign-in is recommended for the administrator account.
 - **Supabase** for the persistent invite/allowlist table.
 - **Resend** for invitation emails.
 - **Streamlit Secrets** for every credential. Do not commit real secrets to GitHub.
@@ -86,18 +86,18 @@ Create a Supabase project, open its SQL editor, and run `setup_access.sql` from 
 
 The table has no public RLS policies. The app uses the Supabase service-role key on the server side.
 
-### 2. Configure Google sign-in
+### 2. Configure Auth0 email sign-in
 
-Create a Google OAuth/OIDC web client and add this authorized redirect URI:
+Create an Auth0 application and configure email passwordless sign-in (one-time code or magic link). Add this callback URL:
 
 ```
 https://YOUR-APP.streamlit.app/oauth2callback
 ```
 
-Google's OIDC metadata URL is:
+Your Auth0 OIDC metadata URL will look like:
 
 ```
-https://accounts.google.com/.well-known/openid-configuration
+https://YOUR-AUTH0-DOMAIN/.well-known/openid-configuration
 ```
 
 ### 3. Configure Streamlit Secrets
@@ -110,7 +110,7 @@ Open the deployed app's **Settings → Secrets** and copy the structure from:
 
 Replace every placeholder with the real value. The email in `admin_emails` is the administrator account that can always enter the app and manage invitations.
 
-Generate a long random `cookie_secret`. Keep the Google client secret, Supabase service-role key, and Resend API key only in Streamlit Secrets.
+Generate a long random `cookie_secret`. Keep the Auth0 client secret, Supabase service-role key, and Resend API key only in Streamlit Secrets.
 
 ### 4. Configure invitation email
 
