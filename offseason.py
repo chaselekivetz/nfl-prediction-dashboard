@@ -44,6 +44,14 @@ OFFSEASON_DISPLAY_NAMES = {
     "trade_departures": "Trade departures",
 }
 
+OFFSEASON_DETAIL_COLUMNS = [
+    "added_players",
+    "departed_players",
+    "drafted_players",
+    "trade_added_players",
+    "trade_departed_players",
+]
+
 
 def _to_pandas(frame):
     if isinstance(frame, pd.DataFrame):
@@ -139,12 +147,19 @@ def _primary_passers(player_stats: pd.DataFrame) -> dict[tuple[int, str], str]:
     }
 
 
-def _draft_impact_for_team(drafts: pd.DataFrame, season: int, team: str) -> float:
+def _draft_rows_for_team(drafts: pd.DataFrame, season: int, team: str) -> pd.DataFrame:
     if drafts.empty or "season" not in drafts.columns or "team" not in drafts.columns:
-        return 0.0
+        return pd.DataFrame()
     d = drafts.copy()
     d["team"] = d["team"].map(_norm_team)
-    d = d[(pd.to_numeric(d["season"], errors="coerce") == season) & (d["team"] == team)]
+    return d[
+        (pd.to_numeric(d["season"], errors="coerce") == season)
+        & (d["team"] == team)
+    ].copy()
+
+
+def _draft_impact_for_team(drafts: pd.DataFrame, season: int, team: str) -> float:
+    d = _draft_rows_for_team(drafts, season, team)
     if d.empty:
         return 0.0
 
@@ -159,30 +174,116 @@ def _draft_impact_for_team(drafts: pd.DataFrame, season: int, team: str) -> floa
     return float(total)
 
 
-def _trade_counts(trades: pd.DataFrame, season: int, team: str) -> tuple[float, float]:
+def _clean_name(value) -> str:
+    if pd.isna(value):
+        return ""
+    value = str(value).strip()
+    if not value or value.lower() in {"nan", "none"}:
+        return ""
+    return value
+
+
+def _format_name(name, position="", pick=None) -> str:
+    name = _clean_name(name)
+    if not name:
+        return ""
+
+    details = []
+    position = _clean_name(position)
+    if position:
+        details.append(position)
+
+    if pick is not None:
+        pick_value = pd.to_numeric(pick, errors="coerce")
+        if pd.notna(pick_value):
+            details.append(f"pick {int(pick_value)}")
+
+    return f"{name} ({', '.join(details)})" if details else name
+
+
+def _roster_player_names(roster: pd.DataFrame, keys: set[str]) -> str:
+    if roster.empty or not keys:
+        return ""
+
+    selected = roster[roster["player_key"].isin(keys)].copy()
+    names = []
+    for row in selected.itertuples():
+        label = _format_name(
+            getattr(row, "full_name", ""),
+            getattr(row, "position", ""),
+        )
+        if label:
+            names.append(label)
+    return " | ".join(sorted(set(names)))
+
+
+def _draft_player_names(drafts: pd.DataFrame, season: int, team: str) -> str:
+    d = _draft_rows_for_team(drafts, season, team)
+    if d.empty:
+        return ""
+
+    name_col = next(
+        (c for c in ["pfr_player_name", "player_name", "full_name", "name"] if c in d.columns),
+        None,
+    )
+    if not name_col:
+        return ""
+
+    names = []
+    for row in d.itertuples():
+        label = _format_name(
+            getattr(row, name_col, ""),
+            getattr(row, "position", ""),
+            getattr(row, "pick", None),
+        )
+        if label:
+            names.append(label)
+    return " | ".join(names)
+
+
+def _trade_details(trades: pd.DataFrame, season: int, team: str) -> tuple[float, float, str, str]:
     if trades.empty or "season" not in trades.columns:
-        return 0.0, 0.0
+        return 0.0, 0.0, "", ""
 
     t = trades.copy()
     t = t[pd.to_numeric(t["season"], errors="coerce") == season]
     if t.empty:
-        return 0.0, 0.0
+        return 0.0, 0.0, "", ""
 
     if "gave" in t.columns:
         t["gave"] = t["gave"].map(_norm_team)
     if "received" in t.columns:
         t["received"] = t["received"].map(_norm_team)
 
-    if "pfr_name" in t.columns:
-        player_rows = t[t["pfr_name"].notna()].copy()
+    name_col = next(
+        (c for c in ["pfr_name", "player_name", "full_name", "name"] if c in t.columns),
+        None,
+    )
+
+    if name_col:
+        player_rows = t[t[name_col].notna()].copy()
     elif "pfr_id" in t.columns:
         player_rows = t[t["pfr_id"].notna()].copy()
     else:
-        player_rows = t
+        player_rows = t.copy()
 
-    additions = float((player_rows.get("received", pd.Series(dtype=str)) == team).sum())
-    departures = float((player_rows.get("gave", pd.Series(dtype=str)) == team).sum())
-    return additions, departures
+    additions_mask = player_rows.get("received", pd.Series("", index=player_rows.index)) == team
+    departures_mask = player_rows.get("gave", pd.Series("", index=player_rows.index)) == team
+
+    additions = float(additions_mask.sum())
+    departures = float(departures_mask.sum())
+
+    addition_names = ""
+    departure_names = ""
+    if name_col:
+        addition_names = " | ".join(
+            sorted({_clean_name(v) for v in player_rows.loc[additions_mask, name_col] if _clean_name(v)})
+        )
+        departure_names = " | ".join(
+            sorted({_clean_name(v) for v in player_rows.loc[departures_mask, name_col] if _clean_name(v)})
+        )
+
+    return additions, departures, addition_names, departure_names
 
 
 def build_offseason_features(seasons: Iterable[int]) -> pd.DataFrame:
@@ -191,7 +292,7 @@ def build_offseason_features(seasons: Iterable[int]) -> pd.DataFrame:
     primary_qbs = _primary_passers(player_stats)
 
     if rosters.empty:
-        return pd.DataFrame(columns=["season", "team"] + OFFSEASON_FEATURES)
+        return pd.DataFrame(columns=["season", "team"] + OFFSEASON_FEATURES + OFFSEASON_DETAIL_COLUMNS)
 
     teams = sorted(rosters["team"].dropna().astype(str).unique())
     rows = []
@@ -223,7 +324,12 @@ def build_offseason_features(seasons: Iterable[int]) -> pd.DataFrame:
             current_gsis = set(current.get("gsis_id", pd.Series(dtype=str)).dropna().astype(str))
             qb_returning = 1.0 if primary_qb and primary_qb in current_gsis else 0.0
 
-            trade_additions, trade_departures = _trade_counts(trades, season, team)
+            (
+                trade_additions,
+                trade_departures,
+                trade_added_players,
+                trade_departed_players,
+            ) = _trade_details(trades, season, team)
 
             rows.append({
                 "season": season,
@@ -235,6 +341,11 @@ def build_offseason_features(seasons: Iterable[int]) -> pd.DataFrame:
                 "qb_returning": qb_returning,
                 "trade_additions": trade_additions,
                 "trade_departures": trade_departures,
+                "added_players": _roster_player_names(current, additions),
+                "departed_players": _roster_player_names(prior, departures),
+                "drafted_players": _draft_player_names(drafts, season, team),
+                "trade_added_players": trade_added_players,
+                "trade_departed_players": trade_departed_players,
             })
 
     result = pd.DataFrame(rows)
