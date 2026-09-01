@@ -4,7 +4,7 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 
-from access_control import require_access, render_access_sidebar
+from access_control import require_access, render_access_sidebar, render_invite_page
 
 from model import (
     FEATURES,
@@ -468,7 +468,14 @@ st.set_page_config(
 )
 
 current_user = require_access()
-render_access_sidebar(current_user)
+sidebar_action = render_access_sidebar(current_user)
+
+if sidebar_action == "invite_friend" and current_user.is_admin:
+    if st.button("← Back to dashboard", key="back_from_invite_friend"):
+        st.session_state.pop("admin_page", None)
+        st.rerun()
+    render_invite_page(current_user)
+    st.stop()
 
 app_username = profile_username(current_user.email)
 if not app_username:
