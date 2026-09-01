@@ -10,6 +10,7 @@ from model import (
     train_model,
     upcoming_games,
 )
+from offseason import OFFSEASON_FEATURES, OFFSEASON_DISPLAY_NAMES
 
 st.set_page_config(
     page_title="NFL Prediction Lab",
@@ -35,20 +36,16 @@ st.markdown(
 st.title("🏈 NFL Prediction Lab")
 st.caption(
     "Educational sports-analytics dashboard. It estimates game outcomes from historical "
-    "team performance; it is not a wagering recommendation."
+    "team performance plus offseason roster and draft changes."
 )
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_data():
-    # 2023-2025 are the initial three historical seasons.
-    # Completed 2026 games are automatically included when nflverse publishes them.
     return load_nfl_data([2023, 2024, 2025, 2026])
 
 
 @st.cache_resource(show_spinner=False)
 def get_model(_schedules, _team_stats, data_signature):
-    # data_signature changes when the number of completed schedule rows changes,
-    # causing the model to retrain after new final results arrive.
     return train_model(_schedules, _team_stats)
 
 
@@ -64,13 +61,15 @@ with st.sidebar:
         **How updating works**
 
         The data cache expires every 15 minutes while the app is being used.
-        When a new final score appears in nflverse, the next refresh rebuilds
-        the dataset and retrains the logistic-regression model.
+        New final scores are incorporated when nflverse publishes them.
+
+        The V2 model also rebuilds offseason features from current roster,
+        draft, player-stat, and trade datasets.
         """
     )
 
 try:
-    with st.spinner("Loading NFL data and training model..."):
+    with st.spinner("Loading NFL data, offseason moves, and training model..."):
         schedules, team_stats = get_data()
 
         completed_mask = (
@@ -93,8 +92,8 @@ except Exception as exc:
 
 teams = available_teams(bundle)
 
-tab_predict, tab_upcoming, tab_accuracy, tab_method = st.tabs(
-    ["Matchup Predictor", "Upcoming Games", "Model Accuracy", "How It Works"]
+tab_predict, tab_upcoming, tab_offseason, tab_accuracy, tab_method = st.tabs(
+    ["Matchup Predictor", "Upcoming Games", "Offseason Changes", "Model Accuracy", "How It Works"]
 )
 
 with tab_predict:
@@ -126,9 +125,10 @@ with tab_predict:
         )
 
         st.markdown("#### Biggest statistical drivers")
-        factor_df = pd.DataFrame(result["factors"][:6])
-        factor_df = factor_df[["factor", "leans", "raw_difference", "model_contribution"]]
+        factor_df = pd.DataFrame(result["factors"][:8])
+        factor_df = factor_df[["category", "factor", "leans", "raw_difference", "model_contribution"]]
         factor_df.columns = [
+            "Category",
             "Factor",
             "Leans toward",
             "Home − away difference",
@@ -136,7 +136,7 @@ with tab_predict:
         ]
         st.dataframe(factor_df, hide_index=True, use_container_width=True)
 
-        st.markdown("#### Current rolling team profile")
+        st.markdown("#### Current team profile")
         profile_rows = []
         for f in FEATURES:
             profile_rows.append(
@@ -146,11 +146,7 @@ with tab_predict:
                     home: result["home_snapshot"][f],
                 }
             )
-        st.dataframe(
-            pd.DataFrame(profile_rows),
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.dataframe(pd.DataFrame(profile_rows), hide_index=True, use_container_width=True)
 
 
 with tab_upcoming:
@@ -164,6 +160,44 @@ with tab_upcoming:
         st.caption(
             "Use any matchup from this list in the Matchup Predictor. "
             "Final scores are incorporated after a data refresh."
+        )
+
+
+with tab_offseason:
+    st.subheader("2026 offseason roster and draft layer")
+    st.caption(
+        "These are model inputs, not manual opinions. They are rebuilt from nflverse roster, "
+        "draft, player-stat, and trade data when the model refreshes."
+    )
+
+    if bundle.offseason.empty:
+        st.warning("Offseason data is not currently available from the source.")
+    else:
+        latest_season = int(bundle.offseason["season"].max())
+        latest = bundle.offseason[bundle.offseason["season"] == latest_season].copy()
+
+        display_cols = ["team"] + OFFSEASON_FEATURES
+        latest = latest[display_cols]
+        latest = latest.rename(columns={
+            "team": "Team",
+            **{f: OFFSEASON_DISPLAY_NAMES[f] for f in OFFSEASON_FEATURES},
+        })
+
+        st.dataframe(latest.sort_values("Team"), hide_index=True, use_container_width=True)
+
+        st.markdown(
+            """
+            **How to read these values**
+
+            - **Roster continuity** measures how much weighted personnel returned from the previous season.
+            - **Veteran additions/departures** measure weighted roster turnover by position importance.
+            - **Draft class impact** gives earlier picks and higher-impact positions more initial weight.
+            - **Primary QB continuity** checks whether the previous season's leading passer is still on the roster.
+            - **Trade additions/departures** count player movement recorded in the trade dataset.
+
+            These features do not automatically make a team better or worse. The logistic-regression
+            model learns from historical seasons how much each difference has actually mattered.
+            """
         )
 
 
@@ -204,32 +238,34 @@ with tab_method:
     st.subheader("Model design")
     st.markdown(
         """
-        This version uses **logistic regression**, which is a good first machine-learning
-        model because its behavior is understandable and its inputs can be inspected.
+        This version uses **logistic regression** and combines two groups of information.
 
-        For every historical matchup, the program creates pregame rolling statistics.
-        It uses only earlier games, then compares the home and away teams.
-
-        **Tracked signals**
+        **Performance features**
         - 8-game point differential
-        - 8-game points scored
-        - 8-game points allowed
-        - 8-game offensive yards
-        - 8-game yards allowed
+        - 8-game points scored and allowed
+        - 8-game offensive yards and yards allowed
         - 8-game turnover margin
         - last-5 win percentage
         - home/away performance
         - opponent strength
-        - recency weighting by season
 
-        The final model is retrained on all completed games from 2023 onward. Older
-        seasons receive slightly less weight than newer seasons. As 2026 final scores
-        arrive, those games become new training examples.
+        **Offseason features**
+        - roster continuity
+        - weighted veteran additions
+        - weighted veteran departures
+        - draft class impact
+        - primary-QB continuity
+        - player trade additions
+        - player trade departures
+
+        Historical game features are constructed using information available before each game.
+        The final model is retrained on completed games from 2023 onward, with newer seasons
+        receiving slightly more weight.
         """
     )
 
     st.info(
-        "Important model limitation: roster changes, injuries, quarterback changes, "
-        "weather, coaching changes, and other context are not yet included. Those are "
-        "good candidates for a later version."
+        "The offseason layer is an estimate. It does not yet know every player's true future "
+        "performance, exact starting role, coaching fit, injuries, or preseason development. "
+        "Those are candidates for later versions."
     )
