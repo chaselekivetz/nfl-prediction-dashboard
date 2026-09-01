@@ -131,7 +131,7 @@ def require_access() -> AccessUser:
     if not st.user.is_logged_in:
         st.title("🔒 NFL Prediction Lab")
         st.write("This dashboard is private. Sign in with an approved account to continue.")
-        st.button("Sign in with Google", type="primary", on_click=st.login)
+        st.button("Sign in", type="primary", on_click=st.login)
         st.stop()
 
     claims = st.user.to_dict()
