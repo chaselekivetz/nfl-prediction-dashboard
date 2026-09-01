@@ -65,8 +65,32 @@ def _to_pandas(frame):
 
 def load_nfl_data(seasons: Iterable[int] = (2023, 2024, 2025, 2026)):
     seasons = list(seasons)
+
+    # Schedule files are usually published before weekly team-stat files.
+    # Load the full requested schedule range so upcoming 2026 games can appear.
     schedules = _to_pandas(nfl.load_schedules(seasons))
-    team_stats = _to_pandas(nfl.load_team_stats(seasons, summary_level="week"))
+
+    # Load team stats one season at a time. If the newest season has not been
+    # published yet (for example, before Week 1), skip it instead of crashing.
+    stat_frames = []
+    unavailable_seasons = []
+    for season in seasons:
+        try:
+            frame = _to_pandas(
+                nfl.load_team_stats([season], summary_level="week")
+            )
+            if not frame.empty:
+                stat_frames.append(frame)
+        except Exception:
+            unavailable_seasons.append(season)
+
+    if not stat_frames:
+        raise ValueError(
+            "No NFL weekly team-stat files were available for the requested seasons."
+        )
+
+    team_stats = pd.concat(stat_frames, ignore_index=True, sort=False)
+    team_stats.attrs["unavailable_seasons"] = unavailable_seasons
     return schedules, team_stats
 
 
@@ -105,6 +129,8 @@ def normalize_team_stats(team_stats: pd.DataFrame) -> pd.DataFrame:
         + _first_existing(stats, ["rushing_yards"])
     )
 
+    # Offensive giveaways. The exact available fumble fields can vary by dataset release,
+    # so the program only uses fields that actually exist.
     stats["turnovers_lost"] = (
         _first_existing(stats, ["passing_interceptions"])
         + _sum_existing(
@@ -125,6 +151,7 @@ def normalize_team_stats(team_stats: pd.DataFrame) -> pd.DataFrame:
 def completed_games(schedules: pd.DataFrame) -> pd.DataFrame:
     s = schedules.copy()
 
+    # nflverse schedule files use game_type; exclude preseason.
     if "game_type" in s.columns:
         s = s[s["game_type"] != "PRE"].copy()
 
@@ -143,6 +170,7 @@ def completed_games(schedules: pd.DataFrame) -> pd.DataFrame:
     if "gameday" in s.columns:
         s["gameday"] = pd.to_datetime(s["gameday"], errors="coerce")
     else:
+        # Keeps sorting deterministic if a release omits gameday.
         s["gameday"] = pd.to_datetime(
             s["season"].astype(str) + "-01-01", errors="coerce"
         ) + pd.to_timedelta(pd.to_numeric(s["week"], errors="coerce").fillna(0) * 7, unit="D")
@@ -209,6 +237,7 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd.Da
 
     tg = tg.sort_values(["gameday", "game_id", "team"]).reset_index(drop=True)
 
+    # Pregame rolling features: shift(1) guarantees the current game's result is excluded.
     def rolling_prior(series, window, min_periods=1):
         return series.shift(1).rolling(window, min_periods=min_periods).mean()
 
@@ -236,10 +265,13 @@ def build_team_games(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd.Da
         lambda x: rolling_prior(x, 5)
     )
 
+    # Prior season-to-date win percentage, used for opponent strength.
     tg["prior_win_pct"] = grouped["win"].transform(
         lambda x: x.shift(1).expanding(min_periods=1).mean()
     )
 
+    # Location-specific performance (home history for a home prediction,
+    # away history for an away prediction).
     tg["location_win_pct"] = (
         tg.groupby(["team", "is_home"])["win"]
         .transform(lambda x: x.shift(1).rolling(12, min_periods=1).mean())
@@ -285,6 +317,7 @@ def train_model(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> ModelBundl
             "Not enough completed games with rolling features to train the model."
         )
 
+    # Chronological holdout: the newest 20% is never used for fitting the validation model.
     split = max(1, int(len(train_games) * 0.80))
     split = min(split, len(train_games) - 1)
 
@@ -354,6 +387,7 @@ def _latest_snapshot(team_games: pd.DataFrame, team: str, is_home: int) -> dict:
         "turnover_margin_form": float(last8["turnover_margin"].mean()),
         "recent_win_pct": float(last5["win"].mean()),
         "location_win_pct": float(loc["win"].mean()) if not loc.empty else current_win_pct,
+        # For an upcoming game, opponent strength is the opponent's current historical win rate.
         "opponent_strength": current_win_pct,
     }
 
@@ -365,6 +399,7 @@ def predict_matchup(bundle: ModelBundle, away_team: str, home_team: str):
     home = _latest_snapshot(bundle.team_games, home_team, is_home=1)
     away = _latest_snapshot(bundle.team_games, away_team, is_home=0)
 
+    # Each side's opponent strength should describe the team it is about to face.
     home["opponent_strength"] = float(
         bundle.team_games[bundle.team_games["team"] == away_team]["win"].mean()
     )
