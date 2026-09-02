@@ -10,11 +10,32 @@ import nflreadpy as nfl
 
 
 OURLADS_DEPTH_URL = "https://www.ourlads.com/nfldepthcharts/depthcharts.aspx"
+MADDEN_RATINGS_URL = "https://www.ea.com/games/madden-nfl/ratings"
 
 TEAM_ALIASES = {
     "GNB": "GB", "KAN": "KC", "LAR": "LA", "NWE": "NE",
     "NOR": "NO", "SFO": "SF", "TAM": "TB", "LVR": "LV",
     "OAK": "LV", "SDG": "LAC", "STL": "LA", "WSH": "WAS",
+}
+
+TEAM_FULL_NAMES = {
+    "ARI": "Arizona Cardinals", "ATL": "Atlanta Falcons", "BAL": "Baltimore Ravens",
+    "BUF": "Buffalo Bills", "CAR": "Carolina Panthers", "CHI": "Chicago Bears",
+    "CIN": "Cincinnati Bengals", "CLE": "Cleveland Browns", "DAL": "Dallas Cowboys",
+    "DEN": "Denver Broncos", "DET": "Detroit Lions", "GB": "Green Bay Packers",
+    "HOU": "Houston Texans", "IND": "Indianapolis Colts", "JAX": "Jacksonville Jaguars",
+    "KC": "Kansas City Chiefs", "LV": "Las Vegas Raiders", "LAC": "Los Angeles Chargers",
+    "LA": "Los Angeles Rams", "MIA": "Miami Dolphins", "MIN": "Minnesota Vikings",
+    "NE": "New England Patriots", "NO": "New Orleans Saints", "NYG": "New York Giants",
+    "NYJ": "NY Jets", "PHI": "Philadelphia Eagles", "PIT": "Pittsburgh Steelers",
+    "SF": "San Francisco 49ers", "SEA": "Seattle Seahawks", "TB": "Tampa Bay Buccaneers",
+    "TEN": "Tennessee Titans", "WAS": "Washington Commanders",
+}
+
+MADDEN_POSITIONS = {
+    "QB","HB","FB","WR","TE","LT","LG","C","RG","RT",
+    "LEDG","REDG","DT","NT","MIKE","WILL","SAM","LB",
+    "CB","FS","SS","K","P","LS",
 }
 
 ESPN_TEAM_SLUGS = {
@@ -28,25 +49,23 @@ ESPN_TEAM_SLUGS = {
     "SEA": "sea", "TB": "tb", "TEN": "ten", "WAS": "wsh",
 }
 
-# The field is an original visualization of the published depth chart. Exact
-# packages vary by play, so nickel and special-team package roles may add a
-# twelfth displayed position.
+# The field is an original Madden-inspired visualization, not a copy of EA's UI.
 OFFENSE_LAYOUT = [
-    ("LWR", 8, 18), ("SWR", 50, 18), ("RWR", 92, 18),
+    ("WR1", 8, 18), ("WR3", 50, 18), ("WR2", 92, 18),
     ("LT", 18, 51), ("LG", 34, 51), ("C", 50, 51),
     ("RG", 66, 51), ("RT", 82, 51), ("TE", 91, 37),
-    ("QB", 50, 70), ("RB", 50, 88),
+    ("QB", 50, 70), ("HB", 50, 88),
 ]
 
 DEFENSE_LAYOUT = [
     ("FS", 39, 12), ("SS", 61, 12),
-    ("LOLB", 17, 38), ("LILB", 39, 38), ("RILB", 61, 38), ("ROLB", 83, 38),
-    ("DE", 26, 60), ("NT", 50, 60), ("DT", 74, 60),
-    ("LCB", 8, 78), ("NB", 50, 87), ("RCB", 92, 78),
+    ("CB1", 8, 78), ("NCB", 50, 87), ("CB2", 92, 78),
+    ("MIKE", 39, 39), ("WILL", 61, 39),
+    ("LEDG", 18, 60), ("DT1", 40, 60), ("DT2", 60, 60), ("REDG", 82, 60),
 ]
 
 SPECIAL_LAYOUT = [
-    ("PK", 18, 28), ("PT", 39, 28), ("LS", 61, 28), ("H", 82, 28),
+    ("K", 18, 28), ("P", 39, 28), ("LS", 61, 28), ("H", 82, 28),
     ("KR", 27, 70), ("PR", 50, 70), ("KO", 73, 70),
 ]
 
@@ -121,6 +140,116 @@ def _http_get(url):
     return response.text
 
 
+def _discover_madden_team_url(team: str) -> str:
+    target = _clean(TEAM_FULL_NAMES.get(team, "")).lower()
+    if not target:
+        return ""
+
+    try:
+        soup = BeautifulSoup(_http_get(MADDEN_RATINGS_URL), "html.parser")
+    except Exception:
+        return ""
+
+    candidates = []
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if "/ratings/teams-ratings/" not in href:
+            continue
+        label = _clean(" ".join(link.stripped_strings)).lower()
+        if href.startswith("/"):
+            href = "https://www.ea.com" + href
+        candidates.append((label, href))
+
+    aliases = {target}
+    if team == "NYJ":
+        aliases.update({"new york jets", "ny jets"})
+    if team == "LA":
+        aliases.update({"los angeles rams", "la rams"})
+    if team == "LAC":
+        aliases.update({"los angeles chargers", "la chargers"})
+
+    for label, href in candidates:
+        if label in aliases:
+            return href
+    for label, href in candidates:
+        if any(alias in label or label in alias for alias in aliases):
+            return href
+    return ""
+
+
+def _load_madden_team(team: str) -> pd.DataFrame:
+    url = _discover_madden_team_url(team)
+
+    # Reliable fallback for the Rams if EA's ratings index only exposes a
+    # subset of team links in its initial HTML.
+    if not url and team == "LA":
+        url = (
+            "https://www.ea.com/games/madden-nfl/ratings/"
+            "teams-ratings/los-angeles-rams/24"
+        )
+
+    if not url:
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(_http_get(url), "html.parser")
+    rows = []
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if "/ratings/player-ratings/" not in href:
+            continue
+
+        name = _clean(" ".join(link.stripped_strings))
+        tr = link.find_parent("tr")
+        if not name or tr is None:
+            continue
+
+        row_text = " ".join(tr.stripped_strings)
+        ovr_match = re.search(r"\bOVR\s*(\d{2})\b", row_text, flags=re.I)
+        if not ovr_match:
+            continue
+
+        position = ""
+        for node in tr.find_all(["a", "span", "div", "td"]):
+            text = _clean(" ".join(node.stripped_strings)).upper()
+            if text in MADDEN_POSITIONS:
+                position = text
+                break
+
+        if not position:
+            # Fallback: choose a compact all-caps token near the player name.
+            tokens = re.findall(r"\b[A-Z]{1,5}\b", row_text.upper())
+            position = next((t for t in tokens if t in MADDEN_POSITIONS), "")
+
+        if not position:
+            continue
+
+        rows.append(
+            {
+                "team": team,
+                "position": position,
+                "rank": 99,
+                "player_name": name,
+                "number": "",
+                "espn_id": "",
+                "headshot_url": "",
+                "madden_ovr": int(ovr_match.group(1)),
+                "updated": pd.Timestamp.utcnow(),
+                "source": "EA SPORTS Madden NFL 27",
+            }
+        )
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    frame = frame.drop_duplicates(["player_name"], keep="first")
+    return frame.sort_values(
+        ["madden_ovr", "position", "player_name"],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+
+
 def _load_ourlads_team(team: str) -> pd.DataFrame:
     html = _http_get(OURLADS_DEPTH_URL)
     soup = BeautifulSoup(html, "html.parser")
@@ -155,6 +284,8 @@ def _load_ourlads_team(team: str) -> pd.DataFrame:
                     "player_name": name,
                     "number": _clean(number),
                     "espn_id": "",
+                    "headshot_url": "",
+                    "madden_ovr": pd.NA,
                     "updated": pd.Timestamp.utcnow(),
                     "source": "Current depth chart",
                 }
@@ -196,6 +327,14 @@ def _load_nflverse_roster_ids(season: int, team: str) -> dict:
         (c for c in ["jersey_number", "jersey", "number"] if c in roster.columns),
         None,
     )
+    headshot_col = next(
+        (
+            c
+            for c in ["headshot_url", "headshot", "headshot_href"]
+            if c in roster.columns
+        ),
+        None,
+    )
     if not name_col:
         return {}
 
@@ -207,6 +346,9 @@ def _load_nflverse_roster_ids(season: int, team: str) -> dict:
         result[_name_key(name)] = {
             "espn_id": _clean(getattr(row, espn_col, "")) if espn_col else "",
             "number": _clean(getattr(row, number_col, "")) if number_col else "",
+            "headshot_url": (
+                _clean(getattr(row, headshot_col, "")) if headshot_col else ""
+            ),
         }
     return result
 
@@ -229,12 +371,27 @@ def _load_espn_roster_ids(team: str) -> dict:
         match = player_re.search(link.get("href", ""))
         if not match:
             continue
-        name = " ".join(link.stripped_strings).strip()
+
+        name = _clean(" ".join(link.stripped_strings))
         if not name:
             continue
-        # Remove a jersey number if ESPN's rendered link text appends it.
         name = re.sub(r"(?<=[A-Za-z.)])\d{1,2}$", "", name).strip()
-        result[_name_key(name)] = {"espn_id": match.group(1)}
+
+        headshot = ""
+        row = link.find_parent("tr")
+        if row is not None:
+            img = row.find("img")
+            if img is not None:
+                headshot = _clean(
+                    img.get("src")
+                    or img.get("data-src")
+                    or img.get("data-default-src")
+                )
+
+        result[_name_key(name)] = {
+            "espn_id": match.group(1),
+            "headshot_url": headshot,
+        }
 
     return result
 
@@ -255,6 +412,13 @@ def _enrich_player_ids(frame: pd.DataFrame, season: int, team: str) -> pd.DataFr
         espn_id = _clean(nfl_info.get("espn_id")) or _clean(espn_info.get("espn_id"))
         if espn_id:
             out.at[index, "espn_id"] = espn_id
+
+        headshot = (
+            _clean(nfl_info.get("headshot_url"))
+            or _clean(espn_info.get("headshot_url"))
+        )
+        if headshot:
+            out.at[index, "headshot_url"] = headshot
 
         if not _clean(row.get("number")):
             number = _clean(nfl_info.get("number"))
@@ -291,6 +455,8 @@ def _load_nflverse_fallback(season: int, team: str) -> pd.DataFrame:
             "rank": pd.to_numeric(frame[rank_col], errors="coerce") if rank_col else 99,
             "number": frame[number_col].map(_clean) if number_col else "",
             "espn_id": frame[espn_col].map(_clean) if espn_col else "",
+            "headshot_url": "",
+            "madden_ovr": pd.NA,
             "updated": pd.Timestamp.utcnow(),
             "source": "nflverse fallback",
         }
@@ -302,47 +468,71 @@ def _load_nflverse_fallback(season: int, team: str) -> pd.DataFrame:
 
 def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
     team = _norm_team(team)
-    try:
-        frame = _load_ourlads_team(team)
-    except Exception:
-        frame = _load_nflverse_fallback(season, team)
 
-    return _enrich_player_ids(frame, season, team)
+    try:
+        current = _load_ourlads_team(team)
+    except Exception:
+        current = _load_nflverse_fallback(season, team)
+
+    try:
+        madden = _load_madden_team(team)
+    except Exception:
+        madden = pd.DataFrame()
+
+    if madden.empty:
+        return _enrich_player_ids(current, season, team)
+
+    # Madden determines the starter ordering. Current depth data supplements
+    # specialist roles and late players that are not present in the ratings DB.
+    current_keys = set()
+    if not current.empty:
+        current = current.copy()
+        current["_name_key"] = current["player_name"].map(_name_key)
+        current_keys = set(current["_name_key"])
+
+    madden = madden.copy()
+    madden["_name_key"] = madden["player_name"].map(_name_key)
+    madden_keys = set(madden["_name_key"])
+
+    supplement = pd.DataFrame()
+    if not current.empty:
+        specialist_positions = {"KR", "PR", "KO", "KOS", "H", "HLD", "LS"}
+        supplement = current[
+            (~current["_name_key"].isin(madden_keys))
+            | (current["position"].isin(specialist_positions))
+        ].copy()
+
+    merged = pd.concat([madden, supplement], ignore_index=True, sort=False)
+    merged = merged.drop(columns=["_name_key"], errors="ignore")
+    merged["madden_ovr"] = pd.to_numeric(
+        merged.get("madden_ovr"),
+        errors="coerce",
+    )
+    merged["rank"] = pd.to_numeric(merged.get("rank"), errors="coerce").fillna(99)
+
+    merged = _enrich_player_ids(merged, season, team)
+    return merged.drop_duplicates(
+        ["team", "position", "player_name"],
+        keep="first",
+    ).reset_index(drop=True)
 
 
 def _position_candidates(position):
     p = str(position).upper()
     aliases = {
-        "LWR": {"LWR", "WR"},
-        "SWR": {"SWR", "SLWR", "SRWR", "WR"},
-        "RWR": {"RWR", "WR"},
-        "TE": {"TE"},
-        "LT": {"LT"},
-        "LG": {"LG", "OG", "G"},
-        "C": {"C"},
-        "RG": {"RG", "OG", "G"},
-        "RT": {"RT"},
-        "QB": {"QB"},
-        "RB": {"RB", "HB"},
-        "DE": {"DE", "LDE", "RDE"},
-        "NT": {"NT", "DT"},
-        "DT": {"DT", "RDT", "LDT", "DE"},
-        "LOLB": {"LOLB", "OLB", "EDGE", "ED"},
-        "LILB": {"LILB", "ILB", "MLB", "LB"},
-        "RILB": {"RILB", "ILB", "MLB", "LB"},
-        "ROLB": {"ROLB", "OLB", "EDGE", "ED"},
-        "LCB": {"LCB", "CB"},
-        "RCB": {"RCB", "CB"},
-        "NB": {"NB", "CB"},
-        "FS": {"FS", "S"},
-        "SS": {"SS", "S"},
-        "PK": {"PK", "K"},
-        "PT": {"PT", "P"},
-        "LS": {"LS"},
-        "H": {"H", "HLD"},
-        "KR": {"KR", "KOR"},
-        "PR": {"PR"},
-        "KO": {"KO", "KOS", "PK", "K"},
+        "WR1": {"WR"}, "WR2": {"WR"}, "WR3": {"WR"},
+        "TE": {"TE"}, "LT": {"LT"}, "LG": {"LG"}, "C": {"C"},
+        "RG": {"RG"}, "RT": {"RT"}, "QB": {"QB"}, "HB": {"HB", "RB"},
+        "LEDG": {"LEDG", "LE", "DE", "EDGE"},
+        "REDG": {"REDG", "RE", "DE", "EDGE"},
+        "DT1": {"DT", "NT"}, "DT2": {"DT", "NT"},
+        "MIKE": {"MIKE", "MLB", "ILB", "LB"},
+        "WILL": {"WILL", "SAM", "OLB", "LB"},
+        "CB1": {"CB"}, "CB2": {"CB"}, "NCB": {"CB", "NB"},
+        "FS": {"FS"}, "SS": {"SS"},
+        "K": {"K", "PK"}, "P": {"P", "PT"}, "LS": {"LS"},
+        "H": {"H", "HLD"}, "KR": {"KR", "KOR"}, "PR": {"PR"},
+        "KO": {"KO", "KOS", "K", "PK"},
     }
     return aliases.get(p, {p})
 
@@ -350,11 +540,26 @@ def _position_candidates(position):
 def _pool(team_rows, group):
     positions = _position_candidates(group)
     rows = team_rows[team_rows["position"].isin(positions)].copy()
+    if rows.empty:
+        return rows
 
-    # Prefer the exact listed position before aliases.
-    rows["_exact"] = (rows["position"] == group).astype(int)
-    rows = rows.sort_values(["_exact", "rank", "player_name"], ascending=[False, True, True])
-    return rows.drop(columns=["_exact"], errors="ignore")
+    exact_position = group
+    if group in {"WR1", "WR2", "WR3"}:
+        exact_position = "WR"
+    elif group in {"CB1", "CB2", "NCB"}:
+        exact_position = "CB"
+    elif group in {"DT1", "DT2"}:
+        exact_position = "DT"
+
+    rows["_exact"] = (rows["position"] == exact_position).astype(int)
+    rows["_ovr"] = pd.to_numeric(rows.get("madden_ovr"), errors="coerce").fillna(-1)
+    rows["_depth_rank"] = pd.to_numeric(rows.get("rank"), errors="coerce").fillna(99)
+
+    rows = rows.sort_values(
+        ["_exact", "_ovr", "_depth_rank", "player_name"],
+        ascending=[False, False, True, True],
+    )
+    return rows.drop(columns=["_exact", "_ovr", "_depth_rank"], errors="ignore")
 
 
 def _slot_payload(slot, team_rows, used):
@@ -384,6 +589,11 @@ def _slot_payload(slot, team_rows, used):
 def _headshot_url(player):
     if player is None:
         return ""
+
+    direct = _clean(getattr(player, "headshot_url", ""))
+    if direct:
+        return direct
+
     espn_id = _clean(getattr(player, "espn_id", ""))
     if not espn_id:
         return ""
@@ -396,6 +606,10 @@ def _card_html(slot, starter, backup, x, y):
 
     name = escape(_clean(starter.player_name))
     number = escape(_clean(getattr(starter, "number", "")))
+    madden_ovr = pd.to_numeric(
+        getattr(starter, "madden_ovr", pd.NA),
+        errors="coerce",
+    )
     headshot = _headshot_url(starter)
     backup_name = escape(_clean(backup.player_name)) if backup is not None else ""
 
@@ -408,11 +622,16 @@ def _card_html(slot, starter, backup, x, y):
         else f"<div class='dc-face dc-face-fallback'>{escape(name[:1].upper())}</div>"
     )
     number_html = f"<span class='dc-number'>#{number}</span>" if number else ""
+    ovr_html = (
+        f"<span class='dc-ovr'>{int(madden_ovr)} OVR</span>"
+        if pd.notna(madden_ovr)
+        else ""
+    )
     backup_html = f"<div class='dc-backup'>2 · {backup_name}</div>" if backup_name else ""
 
     return (
         f"<div class='dc-player' style='left:{x}%;top:{y}%;'>"
-        f"<div class='dc-pos'>{escape(slot)} {number_html}</div>"
+        f"<div class='dc-pos'>{escape(slot)} {number_html} {ovr_html}</div>"
         f"{face_html}"
         f"<div class='dc-name'>{name}</div>"
         f"{backup_html}"
@@ -499,6 +718,7 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
       }}
       .dc-pos {{font-size:8px;font-weight:900;color:#cfe8ff;letter-spacing:.04em;line-height:1}}
       .dc-number {{font-size:7px;color:#72bfff}}
+      .dc-ovr {{font-size:6.5px;color:#59d0ff;margin-left:2px}}
       .dc-face {{
         width:25px;height:25px;border-radius:50%;object-fit:cover;object-position:center 12%;
         margin:2px auto 1px;background:#0f2238;border:1px solid rgba(54,200,255,.45)
@@ -530,16 +750,23 @@ def full_depth_table(depth_data: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     display = depth_data.copy()
+    display["Madden OVR"] = pd.to_numeric(
+        display.get("madden_ovr"),
+        errors="coerce",
+    ).astype("Int64")
     display["Depth"] = display["rank"].map(
-        lambda value: "Starter" if int(value) == 1 else f"{int(value)}"
+        lambda value: "Madden-ranked" if int(value) == 99 else (
+            "Starter" if int(value) == 1 else f"{int(value)}"
+        )
     )
     return display.rename(
         columns={
             "position": "Position",
             "number": "#",
             "player_name": "Player",
+            "source": "Source",
         }
-    )[["Position", "Depth", "#", "Player"]].reset_index(drop=True)
+    )[["Position", "Depth", "#", "Player", "Madden OVR", "Source"]].reset_index(drop=True)
 
 
 def latest_update_label(depth_data: pd.DataFrame, team: str) -> str:
