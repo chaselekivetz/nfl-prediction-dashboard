@@ -59,6 +59,7 @@ from depth_chart import depth_chart_html, latest_update_label, load_team_depth_c
 MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
 GRIDIRON_LOGO_PATH = "assets/gridiron_central_logo.svg"
 APP_DISPLAY_NAME = "Gridiron Central"
+DEPTH_CACHE_VERSION = "depth-chart-v2-team-pages-schema"
 
 
 TEAM_NAMES = {
@@ -610,7 +611,7 @@ def get_injuries(season):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_team_depth_chart(season, team):
+def get_team_depth_chart(season, team, cache_version):
     return load_team_depth_chart(season, team)
 
 
@@ -1279,7 +1280,7 @@ with tab_depth:
 
     try:
         with st.spinner("Loading current depth chart..."):
-            team_depth_chart = get_team_depth_chart(current_season, depth_team)
+            team_depth_chart = get_team_depth_chart(current_season, depth_team, DEPTH_CACHE_VERSION)
     except Exception:
         team_depth_chart = pd.DataFrame()
 
@@ -1294,7 +1295,11 @@ with tab_depth:
         else:
             st.caption("Current depth-chart data")
 
-    depth_html = depth_chart_html(team_depth_chart, depth_team)
+    try:
+        depth_html = depth_chart_html(team_depth_chart, depth_team)
+    except Exception:
+        depth_html = ""
+
     if not depth_html:
         st.info(
             "This team's depth chart is temporarily unavailable. "
