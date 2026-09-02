@@ -152,22 +152,32 @@ def _clean_ourlads_name(value):
     if not text:
         return ""
 
-    previous = None
-    while previous != text:
-        previous = text
-        text = re.sub(
-            r"\s+(?:(?:CC|CF|SF|T|U|W|P)/?[A-Za-z0-9]+|\d{2}/\d+|[A-Za-z]{1,3}\d{2})\*?\^?$",
-            "",
-            text,
-            flags=re.I,
-        ).strip()
+    # Strip only known acquisition/draft metadata at the end, while preserving
+    # every actual name token.
+    text = re.sub(
+        r"\s+(?:(?:CC|CF|SF|T|U|W|P)/[A-Za-z0-9]+|\d{2}/\d+|[A-Za-z]{1,3}\d{2})\*?\^?$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
 
     if "," in text:
         last, first = [part.strip() for part in text.split(",", 1)]
         if first and last:
             text = f"{first} {last}"
 
-    return re.sub(r"\s+", " ", text).strip().title()
+    # Preserve suffixes while presenting source all-caps names cleanly.
+    words = []
+    for word in re.sub(r"\s+", " ", text).split():
+        upper = word.upper().rstrip(".")
+        if upper in {"II", "III", "IV", "V"}:
+            words.append(upper)
+        elif upper in {"JR", "SR"}:
+            words.append(upper.title() + ".")
+        else:
+            words.append(word.title())
+
+    return " ".join(words).strip()
 
 
 def _normalize_position(value):
@@ -199,6 +209,20 @@ def _section_from_heading(text):
     if lowered.startswith("special teams"):
         return "SPECIAL TEAMS"
     return ""
+
+
+def _player_name_from_cell(cell):
+    """Read the actual player link text so first names are not lost."""
+    if cell is None:
+        return ""
+
+    link = cell.find("a")
+    if link is not None:
+        link_text = _clean(" ".join(link.stripped_strings))
+        if link_text:
+            return _clean_ourlads_name(link_text)
+
+    return _clean_ourlads_name(" ".join(cell.stripped_strings))
 
 
 def _load_current_depth_chart(team):
@@ -253,7 +277,8 @@ def _load_current_depth_chart(team):
                 if name_index >= len(values):
                     continue
 
-                name = _clean_ourlads_name(values[name_index])
+                name_cell = cells[name_index] if name_index < len(cells) else None
+                name = _player_name_from_cell(name_cell)
                 if not name:
                     continue
 
@@ -487,7 +512,6 @@ def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
     try:
         current = _load_current_depth_chart(team)
         if not current.empty:
-            current = _enrich_full_names(current, season, team)
             current.attrs["source"] = "Current depth chart"
             return current
     except Exception as exc:
