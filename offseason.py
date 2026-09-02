@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
 import nflreadpy as nfl
+
+from verified_transactions import VERIFIED_PLAYER_TRADES
 
 
 POSITION_WEIGHTS = {
@@ -89,6 +92,15 @@ def _clean_name(value) -> str:
     return value
 
 
+def _name_match_key(value) -> str:
+    text = _clean_name(value).lower()
+    if not text:
+        return ""
+    text = re.sub(r"[^a-z0-9 ]+", "", text)
+    parts = [p for p in text.split() if p not in {"jr", "sr", "ii", "iii", "iv", "v"}]
+    return " ".join(parts)
+
+
 def _norm_team(value):
     if pd.isna(value):
         return value
@@ -153,6 +165,175 @@ def _clean_roster(frame: pd.DataFrame, season: int) -> pd.DataFrame:
     return r.drop_duplicates(["season", "team", "player_key"])
 
 
+def _verified_trade_frame(seasons: Iterable[int]) -> pd.DataFrame:
+    season_set = {int(season) for season in seasons}
+    rows = []
+    for trade in VERIFIED_PLAYER_TRADES:
+        season = int(trade.get("season", 0))
+        if season not in season_set:
+            continue
+        rows.append(
+            {
+                "season": season,
+                "gave": _norm_team(trade.get("from_team", "")),
+                "received": _norm_team(trade.get("to_team", "")),
+                "player_name": _clean_name(trade.get("player_name", "")),
+                "position": _clean_name(trade.get("position", "")),
+                "verified_supplement": True,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _merge_verified_trades(
+    trades: pd.DataFrame,
+    seasons: Iterable[int],
+) -> pd.DataFrame:
+    verified = _verified_trade_frame(seasons)
+    if verified.empty:
+        return trades.copy()
+
+    base = trades.copy() if not trades.empty else pd.DataFrame()
+    merged = pd.concat([base, verified], ignore_index=True, sort=False)
+
+    for column in ["season", "gave", "received"]:
+        if column not in merged.columns:
+            merged[column] = ""
+
+    name_candidates = [
+        c
+        for c in ["pfr_name", "player_name", "full_name", "name"]
+        if c in merged.columns
+    ]
+    merged["_verified_name_key"] = ""
+    for column in name_candidates:
+        candidate = merged[column].map(_name_match_key)
+        empty = merged["_verified_name_key"].eq("")
+        merged.loc[empty, "_verified_name_key"] = candidate.loc[empty]
+
+    merged["_verified_gave"] = merged["gave"].map(_norm_team)
+    merged["_verified_received"] = merged["received"].map(_norm_team)
+    merged["_verified_season"] = pd.to_numeric(
+        merged["season"],
+        errors="coerce",
+    )
+
+    merged = merged.drop_duplicates(
+        [
+            "_verified_season",
+            "_verified_gave",
+            "_verified_received",
+            "_verified_name_key",
+        ],
+        keep="last",
+    )
+
+    return merged.drop(
+        columns=[
+            "_verified_name_key",
+            "_verified_gave",
+            "_verified_received",
+            "_verified_season",
+        ],
+        errors="ignore",
+    ).reset_index(drop=True)
+
+
+def _apply_verified_trades_to_rosters(
+    rosters: pd.DataFrame,
+    seasons: Iterable[int],
+) -> pd.DataFrame:
+    if rosters.empty:
+        return rosters
+
+    r = rosters.copy()
+    r["_name_match_key"] = r["full_name"].map(_name_match_key)
+    season_set = {int(season) for season in seasons}
+
+    additions = []
+    for trade in VERIFIED_PLAYER_TRADES:
+        season = int(trade.get("season", 0))
+        if season not in season_set:
+            continue
+
+        from_team = _norm_team(trade.get("from_team", ""))
+        to_team = _norm_team(trade.get("to_team", ""))
+        player_name = _clean_name(trade.get("player_name", ""))
+        position = _clean_name(trade.get("position", ""))
+        name_key = _name_match_key(player_name)
+        if not name_key or not from_team or not to_team:
+            continue
+
+        current_mask = (
+            (pd.to_numeric(r["season"], errors="coerce") == season)
+            & (r["_name_match_key"] == name_key)
+        )
+        current_matches = r[current_mask].copy()
+
+        source = current_matches[current_matches["team"] == from_team]
+        if source.empty:
+            prior = r[
+                (pd.to_numeric(r["season"], errors="coerce") == season - 1)
+                & (r["_name_match_key"] == name_key)
+            ]
+            source = prior
+        if source.empty:
+            source = current_matches
+
+        # Remove stale pre-trade placement from the old team.
+        r = r[
+            ~(
+                (pd.to_numeric(r["season"], errors="coerce") == season)
+                & (r["team"] == from_team)
+                & (r["_name_match_key"] == name_key)
+            )
+        ].copy()
+
+        already_on_new_team = (
+            (pd.to_numeric(r["season"], errors="coerce") == season)
+            & (r["team"] == to_team)
+            & (r["_name_match_key"] == name_key)
+        ).any()
+        if already_on_new_team:
+            continue
+
+        if not source.empty:
+            row = source.iloc[0].to_dict()
+        else:
+            row = {column: np.nan for column in r.columns}
+            row.update(
+                {
+                    "full_name": player_name,
+                    "position": position,
+                    "status": "Active",
+                    "gsis_id": "",
+                    "pfr_id": "",
+                    "years_exp": np.nan,
+                }
+            )
+
+        row["season"] = season
+        row["team"] = to_team
+        row["full_name"] = _clean_name(row.get("full_name")) or player_name
+        row["position"] = _clean_name(row.get("position")) or position
+        row["status"] = _clean_name(row.get("status")) or "Active"
+        row["_name_match_key"] = name_key
+
+        row_series = pd.Series(row)
+        row["player_key"] = _player_key(row_series)
+        row["position_weight"] = _position_weight(row.get("position"))
+        additions.append(row)
+
+    if additions:
+        r = pd.concat([r, pd.DataFrame(additions)], ignore_index=True, sort=False)
+
+    return (
+        r.drop(columns=["_name_match_key"], errors="ignore")
+        .drop_duplicates(["season", "team", "player_key"], keep="last")
+        .reset_index(drop=True)
+    )
+
+
 def _clean_depth_charts(frame: pd.DataFrame, season: int) -> pd.DataFrame:
     d = frame.copy()
     if d.empty:
@@ -199,6 +380,7 @@ def load_offseason_source_data(seasons: Iterable[int]):
         if roster_frames
         else pd.DataFrame()
     )
+    rosters = _apply_verified_trades_to_rosters(rosters, seasons)
 
     try:
         drafts = _to_pandas(nfl.load_draft_picks(seasons))
@@ -209,6 +391,8 @@ def load_offseason_source_data(seasons: Iterable[int]):
         trades = _to_pandas(nfl.load_trades())
     except Exception:
         trades = pd.DataFrame()
+
+    trades = _merge_verified_trades(trades, seasons)
 
     # Three completed seasons drive the current player-ranking UI, while
     # every season's prior year is retained for historical QB-continuity
@@ -951,17 +1135,20 @@ def _trade_details(
     if "received" in t.columns:
         t["received"] = t["received"].map(_norm_team)
 
-    name_col = next(
-        (
-            c
-            for c in ["pfr_name", "player_name", "full_name", "name"]
-            if c in t.columns
-        ),
-        None,
-    )
-
-    if name_col:
-        player_rows = t[t[name_col].notna()].copy()
+    name_candidates = [
+        c
+        for c in ["pfr_name", "player_name", "full_name", "name"]
+        if c in t.columns
+    ]
+    name_col = None
+    if name_candidates:
+        t["_trade_player_name"] = ""
+        for column in name_candidates:
+            values = t[column].map(_clean_name)
+            empty = t["_trade_player_name"].eq("")
+            t.loc[empty, "_trade_player_name"] = values.loc[empty]
+        name_col = "_trade_player_name"
+        player_rows = t[t[name_col].ne("")].copy()
     elif "pfr_id" in t.columns:
         player_rows = t[t["pfr_id"].notna()].copy()
     else:
