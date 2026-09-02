@@ -436,8 +436,88 @@ def _position_group(position):
     return "OTHER"
 
 
+def _ensure_slot_metadata(rows):
+    """Normalize old/cached depth-chart frames to the current renderer schema."""
+    if rows is None or rows.empty:
+        return rows
+
+    out = rows.copy()
+
+    if "position" not in out.columns:
+        out["position"] = ""
+    out["position"] = out["position"].map(_normalize_position)
+
+    if "rank" not in out.columns:
+        out["rank"] = 99
+    out["rank"] = pd.to_numeric(out["rank"], errors="coerce").fillna(99)
+
+    if "section" not in out.columns:
+        out["section"] = out["position"].map(_position_group)
+    else:
+        missing_section = out["section"].isna() | out["section"].astype(str).str.strip().eq("")
+        out.loc[missing_section, "section"] = out.loc[
+            missing_section, "position"
+        ].map(_position_group)
+
+    # Older cached frames did not have source slot IDs. Rebuild a stable
+    # position slot so the renderer can still work instead of raising KeyError.
+    if "slot_order" not in out.columns:
+        slot_orders = {}
+        rebuilt = []
+        for row in out.itertuples():
+            section = _clean(getattr(row, "section", "")) or _position_group(
+                getattr(row, "position", "")
+            )
+            position = _normalize_position(getattr(row, "position", ""))
+            key = (section, position)
+
+            # All players with the same position in an old frame belong to one
+            # legacy slot. Fresh data will preserve duplicate source rows.
+            if key not in slot_orders:
+                section_count = sum(
+                    1 for existing in slot_orders if existing[0] == section
+                ) + 1
+                slot_orders[key] = section_count
+
+            rebuilt.append(slot_orders[key])
+        out["slot_order"] = rebuilt
+    else:
+        out["slot_order"] = pd.to_numeric(
+            out["slot_order"], errors="coerce"
+        ).fillna(999).astype(int)
+
+    if "slot_id" not in out.columns:
+        out["slot_id"] = (
+            out["section"].astype(str)
+            + ":"
+            + out["slot_order"].astype(str)
+            + ":"
+            + out["position"].astype(str)
+        )
+    else:
+        missing_slot = out["slot_id"].isna() | out["slot_id"].astype(str).str.strip().eq("")
+        out.loc[missing_slot, "slot_id"] = (
+            out.loc[missing_slot, "section"].astype(str)
+            + ":"
+            + out.loc[missing_slot, "slot_order"].astype(str)
+            + ":"
+            + out.loc[missing_slot, "position"].astype(str)
+        )
+
+    for column, default in {
+        "player_name": "",
+        "number": "",
+        "team": "",
+    }.items():
+        if column not in out.columns:
+            out[column] = default
+
+    return out
+
+
 def _ordered_slots(rows, group):
-    if rows.empty:
+    rows = _ensure_slot_metadata(rows)
+    if rows is None or rows.empty:
         return []
 
     preferred = (
@@ -494,14 +574,16 @@ def _player_cell(row):
 
 
 def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
-    if depth_data.empty:
+    if depth_data is None or depth_data.empty:
         return ""
 
-    rows = depth_data[depth_data["team"] == _norm_team(team)].copy()
+    rows = _ensure_slot_metadata(depth_data)
+    if rows is None or rows.empty or "team" not in rows.columns:
+        return ""
+
+    rows = rows[rows["team"].map(_norm_team) == _norm_team(team)].copy()
     if rows.empty:
         return ""
-
-    rows["rank"] = pd.to_numeric(rows["rank"], errors="coerce").fillna(99)
 
     sections = []
 
