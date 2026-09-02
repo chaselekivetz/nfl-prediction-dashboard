@@ -73,6 +73,7 @@ def load_depth_chart_data(season: int) -> pd.DataFrame:
     pos_col = _first_column(frame, ["pos_abb", "position", "pos"])
     rank_col = _first_column(frame, ["pos_rank", "depth", "depth_rank"])
     number_col = _first_column(frame, ["jersey_number", "jersey", "number"])
+    espn_col = _first_column(frame, ["espn_id", "espn_player_id"])
     date_col = _first_column(frame, ["dt", "date", "updated"])
 
     if team_col is None or name_col is None or pos_col is None:
@@ -90,6 +91,7 @@ def load_depth_chart_data(season: int) -> pd.DataFrame:
         else 99
     )
     out["number"] = frame[number_col].map(_clean) if number_col else ""
+    out["espn_id"] = frame[espn_col].map(_clean) if espn_col else ""
 
     if date_col:
         out["updated"] = pd.to_datetime(frame[date_col], errors="coerce", utc=True)
@@ -208,26 +210,55 @@ def _slot_payload(slot, team_rows, used):
     return starter, backup
 
 
+def _headshot_url(player) -> str:
+    if player is None:
+        return ""
+    espn_id = _clean(getattr(player, "espn_id", ""))
+    if not espn_id:
+        return ""
+    return f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png"
+
+
 def _card_html(slot, starter, backup, x, y):
     display_slot = slot.replace("-L", "").replace("-R", "")
+
     if starter is None:
         starter_name = "TBD"
         starter_num = ""
+        headshot = ""
     else:
-        starter_name = escape(str(starter.player_name))
-        starter_num = escape(str(starter.number)) if str(starter.number) else ""
+        starter_name = escape(_clean(getattr(starter, "player_name", "")) or "TBD")
+        starter_num = escape(_clean(getattr(starter, "number", "")))
+        headshot = _headshot_url(starter)
 
-    backup_name = escape(str(backup.player_name)) if backup is not None else "—"
-    number_html = f"<span class='dc-number'>#{starter_num}</span>" if starter_num else ""
+    backup_name = (
+        escape(_clean(getattr(backup, "player_name", "")))
+        if backup is not None
+        else "—"
+    )
 
-    return f"""
-      <div class="dc-player" style="left:{x}%; top:{y}%;">
-        <div class="dc-pos">{escape(display_slot)}</div>
-        {number_html}
-        <div class="dc-name">{starter_name}</div>
-        <div class="dc-backup">{backup_name}</div>
-      </div>
-    """
+    number_html = (
+        f"<span class='dc-number'>#{starter_num}</span>"
+        if starter_num
+        else ""
+    )
+    face_html = (
+        f"<img class='dc-face' src='{escape(headshot)}' alt='' loading='lazy' "
+        f"onerror=\"this.style.display='none'\" />"
+        if headshot
+        else "<div class='dc-face dc-face-fallback'></div>"
+    )
+
+    # Keep this as one compact HTML string. Streamlit's Markdown parser can
+    # otherwise treat indented nested tags as code blocks.
+    return (
+        f"<div class='dc-player' style='left:{x}%;top:{y}%;'>"
+        f"<div class='dc-pos'>{escape(display_slot)} {number_html}</div>"
+        f"{face_html}"
+        f"<div class='dc-name'>{starter_name}</div>"
+        f"<div class='dc-backup'>{backup_name}</div>"
+        f"</div>"
+    )
 
 
 def _field_html(title, layout, team_rows):
@@ -237,17 +268,16 @@ def _field_html(title, layout, team_rows):
         starter, backup = _slot_payload(slot, team_rows, used)
         cards.append(_card_html(slot, starter, backup, x, y))
 
-    return f"""
-    <section class="dc-panel">
-      <div class="dc-panel-title">{escape(title)}</div>
-      <div class="dc-field">
-        <div class="dc-midline"></div>
-        <div class="dc-yard y1"></div><div class="dc-yard y2"></div>
-        <div class="dc-yard y3"></div><div class="dc-yard y4"></div>
-        {''.join(cards)}
-      </div>
-    </section>
-    """
+    return (
+        f"<section class='dc-panel'>"
+        f"<div class='dc-panel-title'>{escape(title)}</div>"
+        f"<div class='dc-field'>"
+        f"<div class='dc-midline'></div>"
+        f"<div class='dc-yard y1'></div><div class='dc-yard y2'></div>"
+        f"<div class='dc-yard y3'></div><div class='dc-yard y4'></div>"
+        f"{''.join(cards)}"
+        f"</div></section>"
+    )
 
 
 def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
@@ -280,7 +310,7 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
         border-left:4px solid var(--blue);padding-left:12px;margin:2px 0 12px 4px;
       }}
       .dc-field {{
-        position:relative;height:520px;overflow:hidden;border-radius:14px;
+        position:relative;height:430px;overflow:hidden;border-radius:14px;
         background:
           linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),
           linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),
@@ -298,27 +328,33 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
       .dc-yard.y1{{left:20%}} .dc-yard.y2{{left:40%}} .dc-yard.y3{{left:60%}} .dc-yard.y4{{left:80%}}
       .dc-player {{
         position:absolute;transform:translate(-50%,-50%);
-        width:118px;min-height:75px;padding:7px 8px;border-radius:10px;
+        width:92px;min-height:64px;padding:5px 6px;border-radius:9px;
         background:linear-gradient(180deg,#0d1d31,#07101c);
         border:1px solid #4a6078;box-shadow:0 5px 18px rgba(0,0,0,.35), inset 0 0 0 1px rgba(20,149,255,.15);
         text-align:center;color:#fff;
       }}
       .dc-player:hover {{border-color:var(--cyan);box-shadow:0 0 20px rgba(8,124,255,.28)}}
-      .dc-pos {{font-size:12px;font-weight:900;color:#cfe8ff;letter-spacing:.08em}}
-      .dc-number {{font-size:10px;color:#72bfff;margin-left:4px}}
-      .dc-name {{font-size:11px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}}
-      .dc-backup {{font-size:9px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px}}
+      .dc-pos {{font-size:10px;font-weight:900;color:#cfe8ff;letter-spacing:.06em;line-height:1}}
+      .dc-number {{font-size:8px;color:#72bfff;margin-left:2px}}
+      .dc-face {{width:28px;height:28px;border-radius:50%;object-fit:cover;object-position:center 15%;display:block;margin:3px auto 2px;background:#0f2238;border:1px solid rgba(54,200,255,.45)}}
+      .dc-face-fallback {{background:radial-gradient(circle at 50% 38%,#52708d 0 25%,#1a3149 26% 55%,#0d1b2a 56%)}}
+      .dc-name {{font-size:9px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15}}
+      .dc-backup {{font-size:7px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;border-top:1px solid rgba(255,255,255,.08);padding-top:2px;line-height:1.1}}
       @media (min-width:1050px) {{
-        .dc-grid {{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
-        .dc-field {{height:610px}}
-        .dc-player {{width:88px;padding:6px 5px}}
-        .dc-name {{font-size:10px}}
-        .dc-backup {{font-size:8px}}
+        .dc-grid {{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
+        .dc-panel {{padding:10px;border-radius:14px}}
+        .dc-panel-title {{font-size:15px;margin-bottom:8px}}
+        .dc-field {{height:430px}}
+        .dc-player {{width:72px;min-height:58px;padding:4px 4px}}
+        .dc-face {{width:24px;height:24px;margin:2px auto 1px}}
+        .dc-name {{font-size:8px}}
+        .dc-backup {{font-size:6.5px}}
       }}
       @media (min-width:1450px) {{
-        .dc-player {{width:104px}}
-        .dc-name {{font-size:11px}}
-        .dc-backup {{font-size:9px}}
+        .dc-player {{width:82px}}
+        .dc-face {{width:27px;height:27px}}
+        .dc-name {{font-size:9px}}
+        .dc-backup {{font-size:7px}}
       }}
     </style>
     <div class="dc-wrap"><div class="dc-grid">{offense}{defense}{special}</div></div>
