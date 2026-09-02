@@ -158,7 +158,7 @@ def _load_current_depth_chart(team):
     rows = []
 
     for tr in soup.find_all("tr"):
-        cells = tr.find_all(["td", "th"])
+        cells = tr.find_all(["td", "th"], recursive=False)
         if len(cells) < 4:
             continue
 
@@ -172,12 +172,28 @@ def _load_current_depth_chart(team):
         }:
             continue
 
-        for rank, index in enumerate(range(3, len(values), 2), start=1):
-            name = _clean_ourlads_name(values[index] if index < len(values) else "")
+        player_slots = [
+            (1, 2, 3),
+            (2, 4, 5),
+            (3, 6, 7),
+            (4, 8, 9),
+            (5, 10, 11),
+        ]
+
+        for rank, number_index, name_index in player_slots:
+            if name_index >= len(values):
+                continue
+
+            name = _clean_ourlads_name(values[name_index])
             if not name:
                 continue
 
-            number = _clean(values[index - 1] if index - 1 < len(values) else "")
+            number = _clean(
+                values[number_index]
+                if number_index < len(values)
+                else ""
+            )
+
             rows.append(
                 {
                     "team": team,
@@ -301,17 +317,21 @@ def _ordered_positions(rows, group):
     return ordered
 
 
-def _player_chip(row):
+DEPTH_COLUMN_LABELS = {
+    1: "Starter",
+    2: "Backup",
+    3: "3rd String",
+    4: "4th String",
+    5: "5th String",
+}
+
+
+def _player_cell(row):
+    if row is None:
+        return "<div class='dc-player-cell dc-empty'></div>"
+
     name = escape(_clean(row.player_name))
     number = escape(_clean(row.number))
-    rank = int(row.rank) if pd.notna(row.rank) else 99
-
-    rank_label = (
-        "Starter"
-        if rank == 1
-        else f"{rank}"
-    )
-
     number_html = (
         f"<span class='dc-number'>#{number}</span>"
         if number
@@ -319,8 +339,7 @@ def _player_chip(row):
     )
 
     return (
-        "<div class='dc-chip'>"
-        f"<span class='dc-rank'>{escape(rank_label)}</span>"
+        "<div class='dc-player-cell'>"
         f"<span class='dc-player-name'>{name}</span>"
         f"{number_html}"
         "</div>"
@@ -350,9 +369,16 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
                 group_rows[group_rows["position"] == position]
                 .sort_values(["rank", "player_name"])
             )
-            chips = "".join(
-                _player_chip(row)
-                for row in players.itertuples()
+
+            by_rank = {}
+            for player in players.itertuples():
+                rank = int(player.rank) if pd.notna(player.rank) else 99
+                if 1 <= rank <= 5 and rank not in by_rank:
+                    by_rank[rank] = player
+
+            player_cells = "".join(
+                _player_cell(by_rank.get(rank))
+                for rank in range(1, 6)
             )
 
             label = POSITION_LABELS.get(position, position)
@@ -360,13 +386,22 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
                 "<div class='dc-row'>"
                 f"<div class='dc-position'><strong>{escape(position)}</strong>"
                 f"<span>{escape(label)}</span></div>"
-                f"<div class='dc-players'>{chips}</div>"
+                f"{player_cells}"
                 "</div>"
             )
+
+        header_cells = "".join(
+            f"<div class='dc-depth-label'>{escape(DEPTH_COLUMN_LABELS[rank])}</div>"
+            for rank in range(1, 6)
+        )
 
         sections.append(
             "<section class='dc-section'>"
             f"<div class='dc-heading'>{escape(group)}</div>"
+            "<div class='dc-columns'>"
+            "<div class='dc-position-header'>Position</div>"
+            f"{header_cells}"
+            "</div>"
             f"{''.join(position_rows)}"
             "</section>"
         )
@@ -380,14 +415,17 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
 
       .dc-section {{
         margin:0 0 18px 0;
-        overflow:hidden;
+        overflow-x:auto;
+        overflow-y:hidden;
         border:1px solid #22364d;
         border-radius:13px;
         background:linear-gradient(180deg,#07131f,#040a12);
       }}
 
       .dc-heading {{
+        min-width:900px;
         padding:9px 14px;
+        box-sizing:border-box;
         font-size:13px;
         font-weight:900;
         letter-spacing:.12em;
@@ -397,11 +435,32 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
         border-left:4px solid #0d8cff;
       }}
 
+      .dc-columns,
       .dc-row {{
         display:grid;
-        grid-template-columns:170px minmax(0,1fr);
-        align-items:center;
-        min-height:58px;
+        grid-template-columns:150px repeat(5, 150px);
+        width:900px;
+        align-items:stretch;
+      }}
+
+      .dc-columns {{
+        background:#08131f;
+        border-bottom:1px solid rgba(255,255,255,.1);
+      }}
+
+      .dc-position-header,
+      .dc-depth-label {{
+        padding:7px 10px;
+        color:#7f94aa;
+        font-size:9px;
+        font-weight:800;
+        text-transform:uppercase;
+        letter-spacing:.06em;
+        border-right:1px solid rgba(255,255,255,.06);
+      }}
+
+      .dc-row {{
+        min-height:50px;
         border-bottom:1px solid rgba(255,255,255,.07);
       }}
 
@@ -410,91 +469,73 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
       }}
 
       .dc-position {{
-        height:100%;
-        box-sizing:border-box;
         display:flex;
         flex-direction:column;
         justify-content:center;
-        padding:8px 13px;
+        box-sizing:border-box;
+        padding:7px 10px;
         background:rgba(13,140,255,.06);
         border-right:1px solid rgba(255,255,255,.08);
       }}
 
       .dc-position strong {{
         color:#8fd3ff;
-        font-size:14px;
+        font-size:13px;
         line-height:1.1;
       }}
 
       .dc-position span {{
         color:#7f94aa;
-        font-size:10px;
-        margin-top:3px;
-      }}
-
-      .dc-players {{
-        display:flex;
-        align-items:center;
-        gap:8px;
-        padding:8px 10px;
-        overflow-x:auto;
-        scrollbar-width:thin;
-      }}
-
-      .dc-chip {{
-        flex:0 0 auto;
-        display:flex;
-        align-items:center;
-        gap:6px;
-        min-width:150px;
-        padding:8px 10px;
-        border-radius:8px;
-        background:#0b1725;
-        border:1px solid #29425d;
-      }}
-
-      .dc-chip:first-child {{
-        border-color:#0d8cff;
-        box-shadow:inset 0 0 0 1px rgba(13,140,255,.13);
-      }}
-
-      .dc-rank {{
-        flex:0 0 auto;
-        min-width:34px;
-        color:#5fc2ff;
         font-size:9px;
-        font-weight:800;
-        text-transform:uppercase;
+        margin-top:2px;
+      }}
+
+      .dc-player-cell {{
+        display:flex;
+        align-items:center;
+        gap:5px;
+        padding:7px 9px;
+        box-sizing:border-box;
+        border-right:1px solid rgba(255,255,255,.06);
+      }}
+
+      .dc-empty {{
+        background:transparent;
       }}
 
       .dc-player-name {{
-        color:#fff;
-        font-size:12px;
+        color:#ffffff;
+        font-size:11px;
         font-weight:750;
         white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        max-width:118px;
       }}
 
       .dc-number {{
-        color:#7f94aa;
-        font-size:9px;
+        color:#71869d;
+        font-size:8px;
         white-space:nowrap;
       }}
 
       @media (max-width:850px) {{
+        .dc-columns,
         .dc-row {{
-          grid-template-columns:110px minmax(0,1fr);
+          grid-template-columns:105px repeat(5, 140px);
+          width:805px;
+        }}
+
+        .dc-heading {{
+          min-width:805px;
         }}
 
         .dc-position {{
-          padding:7px 8px;
+          padding:6px 7px;
         }}
 
         .dc-position span {{
           display:none;
-        }}
-
-        .dc-chip {{
-          min-width:135px;
         }}
       }}
     </style>
