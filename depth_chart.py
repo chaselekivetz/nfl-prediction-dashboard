@@ -28,8 +28,8 @@ DEFENSE_LAYOUT = [
 ]
 
 SPECIAL_LAYOUT = [
-    ("K", 25, 31), ("P", 50, 31), ("LS", 75, 31),
-    ("KR", 34, 70), ("PR", 66, 70),
+    ("K", 18, 28), ("P", 39, 28), ("LS", 61, 28), ("H", 82, 28),
+    ("KR", 27, 70), ("PR", 50, 70), ("KOS", 73, 70),
 ]
 
 
@@ -133,8 +133,10 @@ def _position_candidates(position):
         "K": {"K", "PK"},
         "P": {"P"},
         "LS": {"LS"},
+        "H": {"H", "HLD"},
         "KR": {"KR", "KOR"},
         "PR": {"PR"},
+        "KOS": {"KOS", "KO", "K"},
     }
     return aliases.get(p, {p})
 
@@ -306,10 +308,17 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
       .dc-number {{font-size:10px;color:#72bfff;margin-left:4px}}
       .dc-name {{font-size:11px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}}
       .dc-backup {{font-size:9px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px}}
-      @media (min-width:1500px) {{
-        .dc-grid {{grid-template-columns:1fr 1fr 1fr}}
-        .dc-field {{height:620px}}
+      @media (min-width:1050px) {{
+        .dc-grid {{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+        .dc-field {{height:610px}}
+        .dc-player {{width:88px;padding:6px 5px}}
+        .dc-name {{font-size:10px}}
+        .dc-backup {{font-size:8px}}
+      }}
+      @media (min-width:1450px) {{
         .dc-player {{width:104px}}
+        .dc-name {{font-size:11px}}
+        .dc-backup {{font-size:9px}}
       }}
     </style>
     <div class="dc-wrap"><div class="dc-grid">{offense}{defense}{special}</div></div>
