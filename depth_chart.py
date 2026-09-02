@@ -17,6 +17,18 @@ TEAM_ALIASES = {
     "OAK": "LV", "SDG": "LAC", "STL": "LA", "WSH": "WAS",
 }
 
+OURLADS_TEAM_CODES = {
+    "ARI": "ARZ", "ATL": "ATL", "BAL": "BAL", "BUF": "BUF",
+    "CAR": "CAR", "CHI": "CHI", "CIN": "CIN", "CLE": "CLE",
+    "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GB": "GB",
+    "HOU": "HOU", "IND": "IND", "JAX": "JAX", "KC": "KC",
+    "LV": "LV", "LAC": "LAC", "LA": "LAR", "MIA": "MIA",
+    "MIN": "MIN", "NE": "NE", "NO": "NO", "NYG": "NYG",
+    "NYJ": "NYJ", "PHI": "PHI", "PIT": "PIT", "SF": "SF",
+    "SEA": "SEA", "TB": "TB", "TEN": "TEN", "WAS": "WAS",
+}
+
+
 OFFENSE_ORDER = [
     "QB", "RB", "FB",
     "LWR", "RWR", "SWR", "WR",
@@ -178,139 +190,123 @@ def _http_get(url):
     return response.text
 
 
-def _load_current_depth_charts_all():
-    html = _http_get(OURLADS_DEPTH_URL)
+def _section_from_heading(text):
+    lowered = _clean(text).lower()
+    if lowered.startswith("offense"):
+        return "OFFENSE"
+    if lowered.startswith("defense"):
+        return "DEFENSE"
+    if lowered.startswith("special teams"):
+        return "SPECIAL TEAMS"
+    return ""
+
+
+def _load_current_depth_chart(team):
+    source_code = OURLADS_TEAM_CODES.get(team)
+    if not source_code:
+        raise RuntimeError(f"No depth-chart source code configured for {team}.")
+
+    url = f"https://www.ourlads.com/nfldepthcharts/depthchart/{source_code}"
+    html = _http_get(url)
     soup = BeautifulSoup(html, "html.parser")
 
     rows = []
-    current_section = None
-    slot_order = {}
+    source_slot_order = 0
 
-    for tr in soup.find_all("tr"):
-        row_text = _clean(" ".join(tr.stripped_strings))
-        lowered = row_text.lower()
-
-        if lowered.startswith("offense -"):
-            current_section = "OFFENSE"
-            continue
-        if lowered.startswith("defense -"):
-            current_section = "DEFENSE"
-            continue
-        if lowered.startswith("special teams -"):
-            current_section = "SPECIAL TEAMS"
-            continue
-        if (
-            lowered.startswith("practice squad -")
-            or lowered.startswith("reserves -")
-        ):
-            current_section = None
+    # Individual team pages have one clean table per unit. This is much more
+    # stable than the all-teams table and keeps Player 1-5 aligned correctly.
+    for heading in soup.find_all(["h2", "h3"]):
+        section = _section_from_heading(" ".join(heading.stripped_strings))
+        if not section:
             continue
 
-        if current_section is None:
+        table = heading.find_next("table")
+        if table is None:
             continue
 
-        # Only use direct table cells. Nested markup can shift depth columns.
-        cells = tr.find_all(["td", "th"], recursive=False)
-        if len(cells) < 4:
-            continue
-
-        values = [" ".join(cell.stripped_strings).strip() for cell in cells]
-        team = _norm_team(values[0])
-        if team not in EXPECTED_TEAMS:
-            continue
-
-        position = _normalize_position(values[1])
-        if not position or position in {"OFF", "DEF", "ST"}:
-            continue
-
-        team_slot_key = (team, current_section)
-        slot_order[team_slot_key] = slot_order.get(team_slot_key, 0) + 1
-        source_slot_order = slot_order[team_slot_key]
-        slot_id = f"{current_section}:{source_slot_order}:{position}"
-
-        player_slots = [
-            (1, 2, 3),
-            (2, 4, 5),
-            (3, 6, 7),
-            (4, 8, 9),
-            (5, 10, 11),
-        ]
-
-        added_player = False
-        for rank, number_index, name_index in player_slots:
-            if name_index >= len(values):
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["td", "th"], recursive=False)
+            if len(cells) < 3:
                 continue
 
-            name = _clean_ourlads_name(values[name_index])
-            if not name:
+            values = [" ".join(cell.stripped_strings).strip() for cell in cells]
+            position = _normalize_position(values[0])
+
+            if not position or position in {"POS", "OFF", "DEF", "ST"}:
                 continue
 
-            number = _clean(
-                values[number_index]
-                if number_index < len(values)
-                else ""
-            )
+            source_slot_order += 1
+            slot_id = f"{section}:{source_slot_order}:{position}"
 
-            rows.append(
-                {
-                    "team": team,
-                    "section": current_section,
-                    "position": position,
-                    "slot_id": slot_id,
-                    "slot_order": source_slot_order,
-                    "rank": rank,
-                    "player_name": name,
-                    "number": number,
-                    "updated": pd.Timestamp.utcnow(),
-                    "source": "Current depth chart",
-                }
-            )
-            added_player = True
+            # Individual page layout:
+            # Pos | No. | Player 1 | No | Player 2 | ... | Player 5
+            player_slots = [
+                (1, 1, 2),
+                (2, 3, 4),
+                (3, 5, 6),
+                (4, 7, 8),
+                (5, 9, 10),
+            ]
 
-        if not added_player:
-            rows.append(
-                {
-                    "team": team,
-                    "section": current_section,
-                    "position": position,
-                    "slot_id": slot_id,
-                    "slot_order": source_slot_order,
-                    "rank": 1,
-                    "player_name": "TBD",
-                    "number": "",
-                    "updated": pd.Timestamp.utcnow(),
-                    "source": "Current depth chart",
-                }
-            )
+            added_player = False
+            for rank, number_index, name_index in player_slots:
+                if name_index >= len(values):
+                    continue
+
+                name = _clean_ourlads_name(values[name_index])
+                if not name:
+                    continue
+
+                number = _clean(
+                    values[number_index]
+                    if number_index < len(values)
+                    else ""
+                )
+
+                rows.append(
+                    {
+                        "team": team,
+                        "section": section,
+                        "position": position,
+                        "slot_id": slot_id,
+                        "slot_order": source_slot_order,
+                        "rank": rank,
+                        "player_name": name,
+                        "number": number,
+                        "updated": pd.Timestamp.utcnow(),
+                        "source": "Current depth chart",
+                    }
+                )
+                added_player = True
+
+            if not added_player:
+                rows.append(
+                    {
+                        "team": team,
+                        "section": section,
+                        "position": position,
+                        "slot_id": slot_id,
+                        "slot_order": source_slot_order,
+                        "rank": 1,
+                        "player_name": "TBD",
+                        "number": "",
+                        "updated": pd.Timestamp.utcnow(),
+                        "source": "Current depth chart",
+                    }
+                )
 
     frame = pd.DataFrame(rows)
     if frame.empty:
-        raise RuntimeError("No current depth-chart rows were parsed.")
-
-    parsed_teams = set(frame["team"].dropna().unique())
-    if len(parsed_teams) < 32:
-        missing = sorted(EXPECTED_TEAMS - parsed_teams)
-        raise RuntimeError(
-            "Current depth-chart source was incomplete. "
-            f"Parsed {len(parsed_teams)} teams; missing: {', '.join(missing)}"
-        )
+        raise RuntimeError(f"No current depth-chart rows parsed for {team}.")
 
     return (
         frame.drop_duplicates(
             ["team", "slot_id", "rank", "player_name"],
             keep="first",
         )
-        .sort_values(["team", "section", "slot_order", "rank"])
+        .sort_values(["section", "slot_order", "rank"])
         .reset_index(drop=True)
     )
-
-
-def _load_current_depth_chart(team):
-    frame = _load_current_depth_charts_all()
-    team_rows = frame[frame["team"] == team].copy()
-    if team_rows.empty:
-        raise RuntimeError(f"No current depth-chart rows parsed for {team}.")
-    return team_rows.reset_index(drop=True)
 
 
 def _load_nflverse_fallback(season, team):
@@ -391,9 +387,37 @@ def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
     team = _norm_team(team)
 
     try:
-        return _load_current_depth_chart(team)
-    except Exception:
-        return _load_nflverse_fallback(season, team)
+        current = _load_current_depth_chart(team)
+        if not current.empty:
+            current.attrs["source"] = "Current depth chart"
+            return current
+    except Exception as exc:
+        current_error = str(exc)
+    else:
+        current_error = ""
+
+    try:
+        fallback = _load_nflverse_fallback(season, team)
+    except Exception as exc:
+        fallback = pd.DataFrame()
+        fallback_error = str(exc)
+    else:
+        fallback_error = ""
+
+    if fallback.empty:
+        empty = pd.DataFrame(
+            columns=[
+                "team", "section", "position", "slot_id", "slot_order",
+                "rank", "player_name", "number", "updated", "source",
+            ]
+        )
+        empty.attrs["live_source_error"] = current_error
+        empty.attrs["fallback_error"] = fallback_error
+        return empty
+
+    fallback.attrs["source"] = "nflverse fallback"
+    fallback.attrs["live_source_error"] = current_error
+    return fallback
 
 
 def _position_group(position):
