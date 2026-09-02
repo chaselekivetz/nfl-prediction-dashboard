@@ -55,7 +55,7 @@ from prediction_game import (
 )
 from team_history import team_history
 
-MODEL_CACHE_VERSION = "player-impact-role-v3-trade-audit"
+MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
 NFL_LOGO_URL = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
 APP_DISPLAY_NAME = "Gridiron Central"
 
@@ -305,8 +305,10 @@ def injury_table_for_team(injury_data, team):
         "report_primary_injury": "Injury",
         "report_secondary_injury": "Secondary",
         "report_status": "Game status",
+        "status_detail": "Status detail",
         "practice_status": "Practice",
         "date_modified": "Updated",
+        "source": "Source",
         "week": "Week",
     }
     display = display.rename(columns={k: v for k, v in rename_map.items() if k in display.columns})
@@ -314,7 +316,7 @@ def injury_table_for_team(injury_data, team):
     if "Updated" in display.columns:
         display["Updated"] = pd.to_datetime(display["Updated"], errors="coerce").dt.strftime("%b %d, %I:%M %p")
 
-    priority = {"out": 0, "doubtful": 1, "questionable": 2}
+    priority = {"out": 0, "unavailable": 1, "doubtful": 2, "questionable": 3}
     if "Game status" in display.columns:
         display["_priority"] = (
             display["Game status"]
@@ -336,14 +338,16 @@ def render_injury_summary(injury_data, team, compact=False):
     if compact:
         st.caption(
             f"Out: {counts['Out']} • Doubtful: {counts['Doubtful']} • "
-            f"Questionable: {counts['Questionable']}"
+            f"Questionable: {counts['Questionable']} • "
+            f"IR/PUP/NFI: {counts['Unavailable']}"
         )
         return
 
-    i1, i2, i3 = st.columns(3)
+    i1, i2, i3, i4 = st.columns(4)
     i1.metric("Out", counts["Out"])
     i2.metric("Doubtful", counts["Doubtful"])
     i3.metric("Questionable", counts["Questionable"])
+    i4.metric("IR / PUP / NFI", counts["Unavailable"])
 
     table = injury_table_for_team(injury_data, team)
     if table.empty:
@@ -599,7 +603,7 @@ def get_model(_schedules, _team_stats, data_signature, model_cache_version):
     return train_model(_schedules, _team_stats)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_injuries(season):
     return load_injury_data(season)
 
@@ -1452,8 +1456,9 @@ with tab_offseason:
 with tab_injuries:
     st.subheader("Player Status")
     st.caption(
-        "Latest official weekly NFL injury-report information from nflverse. "
-        "This panel is informational and does not change the model prediction."
+        "Current league-wide injury and roster-availability tracker. The app refreshes the "
+        "live status source every five minutes while in use and falls back to nflverse if "
+        "the live source is unavailable. Official game designations can still change before kickoff."
     )
 
     injury_team = st.selectbox(
