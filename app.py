@@ -1266,8 +1266,8 @@ with tab_team:
 with tab_depth:
     st.subheader("Depth Chart")
     st.caption(
-        "Madden NFL 27 ratings drive the starter order on the field. Current depth-chart "
-        "data supplements specialist roles, late roster changes, and additional backups."
+        "Current depth chart in a simple horizontal layout: each position is one row, "
+        "with the starter first and the rest of the depth listed across the screen."
     )
 
     depth_team = st.selectbox(
@@ -1300,18 +1300,9 @@ with tab_depth:
     else:
         st.html(depth_html)
         st.caption(
-            "Starter order is Madden 27-first. Current depth data fills specialist and supplemental "
-            "roles. Madden OVR appears on cards when available; actual NFL packages can still vary by play."
+            "The first player in each row is the listed starter. Additional players are shown "
+            "left-to-right in depth order."
         )
-
-        with st.expander("View full depth chart"):
-            full_depth = full_depth_table(team_depth_chart)
-            st.dataframe(
-                full_depth,
-                hide_index=True,
-                use_container_width=True,
-                height=min(560, 70 + len(full_depth) * 34),
-            )
 
 
 with tab_upcoming:
