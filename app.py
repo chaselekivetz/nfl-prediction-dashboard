@@ -1297,7 +1297,7 @@ with tab_depth:
             "It will populate automatically when the latest depth-chart data is published."
         )
     else:
-        st.markdown(depth_html, unsafe_allow_html=True)
+        st.html(depth_html)
         st.caption(
             "Field placement is a Gridiron Central visualization of the published depth chart. "
             "Actual offensive and defensive formations change by package and play."
