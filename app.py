@@ -1,4 +1,5 @@
 import json
+import math
 
 import streamlit as st
 import pandas as pd
@@ -55,6 +56,8 @@ from prediction_game import (
 from team_history import team_history
 
 MODEL_CACHE_VERSION = "player-impact-role-v2"
+NFL_LOGO_URL = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+APP_DISPLAY_NAME = "Gridiron Forecast"
 
 
 TEAM_NAMES = {
@@ -388,6 +391,41 @@ def render_team_upcoming(team, schedules, limit=5):
         )
 
 
+def projected_margin_from_result(result, away, home):
+    """Translate win probability into an approximate matchup margin for display."""
+    try:
+        home_probability = float(result.get("home_probability", 0.5))
+    except Exception:
+        home_probability = 0.5
+
+    home_probability = min(max(home_probability, 0.05), 0.95)
+    signed_home_margin = 8.0 * math.log(home_probability / (1.0 - home_probability))
+    signed_home_margin = max(min(signed_home_margin, 21.0), -21.0)
+
+    if abs(signed_home_margin) < 0.5:
+        return {
+            "team": None,
+            "margin": 0.0,
+            "label": "Approx. even matchup",
+        }
+
+    favored_team = home if signed_home_margin > 0 else away
+    margin = abs(signed_home_margin)
+    return {
+        "team": favored_team,
+        "margin": margin,
+        "label": f"{team_name(favored_team)} by {margin:.1f}",
+    }
+
+
+def matchup_projection(bundle, away, home):
+    try:
+        result = predict_matchup(bundle, away, home)
+    except Exception:
+        return None, None
+    return result, projected_margin_from_result(result, away, home)
+
+
 def game_of_week(bundle, weekly_games):
     if weekly_games.empty:
         return None, None
@@ -445,6 +483,9 @@ def render_game_of_week(game, result):
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            margin = projected_margin_from_result(result, away, home)
+            st.markdown(f"**Model projected margin:** {margin['label']}")
+            st.caption("Approximate model estimate for matchup comparison; not a market line.")
             st.caption(format_kickoff(game))
             st.caption(format_game_location(game))
         with home_col:
@@ -462,7 +503,7 @@ def completed_winner(game):
 
 
 st.set_page_config(
-    page_title="NFL Prediction Lab",
+    page_title=APP_DISPLAY_NAME,
     page_icon="🏈",
     layout="wide",
 )
@@ -524,9 +565,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🏈 NFL Prediction Lab")
+brand_logo, brand_title = st.columns([0.09, 0.91], vertical_alignment="center")
+with brand_logo:
+    st.image(NFL_LOGO_URL, width=72)
+with brand_title:
+    st.markdown(f"# {APP_DISPLAY_NAME}")
+
 st.caption(
-    "Private NFL analytics, weekly prediction challenges, team pages, schedules, "
+    "NFL forecasts, weekly prediction challenges, team intelligence, schedules, "
     "player status, and league exploration."
 )
 
@@ -863,6 +909,19 @@ with tab_challenge:
                     st.image(team_logo_url(home), width=62)
                     st.markdown(f"**{team_name(home)}**")
 
+                matchup_result, matchup_margin = matchup_projection(bundle, away, home)
+                if matchup_margin:
+                    st.markdown(
+                        f"**Model projected margin:** {matchup_margin['label']}"
+                    )
+                    if matchup_result:
+                        st.caption(
+                            f"Model win probability: {team_name(away)} "
+                            f"{matchup_result['away_probability']:.0%} • "
+                            f"{team_name(home)} {matchup_result['home_probability']:.0%}. "
+                            "Analytics estimate only; not a market line."
+                        )
+
                 if winner is not None:
                     pick_text = team_name(existing) if existing else "No pick"
                     result_text = "✅ Correct" if existing == winner else ("❌ Incorrect" if existing else "—")
@@ -1058,6 +1117,11 @@ with tab_predict:
                     unsafe_allow_html=True,
                 )
                 st.metric("Model pick", predicted_name)
+                predictor_margin = projected_margin_from_result(result, away, home)
+                st.markdown(
+                    f"**Model projected margin:** {predictor_margin['label']}"
+                )
+                st.caption("Approximate model estimate; not a market line.")
                 p_away, p_home = st.columns(2)
                 p_away.metric(away, f"{result['away_probability']:.1%}")
                 p_home.metric(home, f"{result['home_probability']:.1%}")
@@ -1232,6 +1296,22 @@ with tab_upcoming:
                     st.caption("Home")
 
                 st.markdown(f"📍 **{format_game_location(game)}**")
+
+                matchup_result, matchup_margin = matchup_projection(
+                    bundle,
+                    away_team,
+                    home_team,
+                )
+                if matchup_margin:
+                    st.markdown(
+                        f"**Model projected margin:** {matchup_margin['label']}"
+                    )
+                    if matchup_result:
+                        st.caption(
+                            f"{team_name(away_team)} {matchup_result['away_probability']:.0%} • "
+                            f"{team_name(home_team)} {matchup_result['home_probability']:.0%} "
+                            "model win probability. Not a market line."
+                        )
 
         st.caption(
             "Use any matchup from this list in the Matchup Predictor. "
