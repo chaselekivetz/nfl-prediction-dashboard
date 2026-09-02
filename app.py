@@ -55,7 +55,7 @@ from prediction_game import (
 )
 from team_history import team_history
 
-MODEL_CACHE_VERSION = "player-impact-role-v2"
+MODEL_CACHE_VERSION = "player-impact-role-v3-trade-audit"
 NFL_LOGO_URL = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
 APP_DISPLAY_NAME = "Gridiron Forecast"
 
@@ -1444,7 +1444,8 @@ with tab_offseason:
 
             st.caption(
                 "Roster additions and departures come from comparing prior-season and current-season "
-                "nflverse rosters. Draft and trade names come from nflverse datasets."
+                "nflverse rosters. Trade data also includes a verified 2026 supplement for confirmed "
+                "player trades that have not yet appeared in the upstream dataset."
             )
 
 
