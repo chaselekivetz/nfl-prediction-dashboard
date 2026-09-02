@@ -383,12 +383,107 @@ def _load_nflverse_fallback(season, team):
     )
 
 
+def _name_tokens(value):
+    text = re.sub(r"[^A-Za-z0-9' -]+", " ", _clean(value))
+    return [part for part in text.split() if part]
+
+
+def _surname_key(value):
+    tokens = [
+        token.lower().strip(".'-")
+        for token in _name_tokens(value)
+        if token.lower().strip(".'-") not in {"jr", "sr", "ii", "iii", "iv", "v"}
+    ]
+    return tokens[-1] if tokens else ""
+
+
+def _enrich_full_names(frame, season, team):
+    """Replace shortened depth-chart names with canonical current-roster names."""
+    if frame is None or frame.empty:
+        return frame
+
+    try:
+        roster = _to_pandas(nfl.load_rosters([int(season)]))
+    except Exception:
+        return frame
+
+    if roster.empty:
+        return frame
+
+    team_col = next(
+        (c for c in ["team", "club_code", "club"] if c in roster.columns),
+        None,
+    )
+    name_col = next(
+        (c for c in ["full_name", "player_name", "name"] if c in roster.columns),
+        None,
+    )
+    number_col = next(
+        (c for c in ["jersey_number", "jersey", "number"] if c in roster.columns),
+        None,
+    )
+
+    if not team_col or not name_col or not number_col:
+        return frame
+
+    roster = roster.copy()
+    roster["_team"] = roster[team_col].map(_norm_team)
+    roster["_name"] = roster[name_col].map(_clean)
+    roster["_number"] = roster[number_col].map(_clean)
+    roster = roster[
+        (roster["_team"] == team)
+        & roster["_name"].ne("")
+        & roster["_number"].ne("")
+    ].copy()
+
+    if roster.empty:
+        return frame
+
+    by_number = {}
+    for row in roster.itertuples():
+        by_number.setdefault(row._number, []).append(row._name)
+
+    out = frame.copy()
+
+    for index, row in out.iterrows():
+        current_name = _clean(row.get("player_name"))
+        number = _clean(row.get("number"))
+
+        if not current_name or current_name == "TBD" or not number:
+            continue
+
+        candidates = list(dict.fromkeys(by_number.get(number, [])))
+        if not candidates:
+            continue
+
+        current_surname = _surname_key(current_name)
+        surname_matches = [
+            candidate
+            for candidate in candidates
+            if _surname_key(candidate) == current_surname
+        ]
+
+        replacement = ""
+        if len(surname_matches) == 1:
+            replacement = surname_matches[0]
+        elif len(candidates) == 1 and len(_name_tokens(current_name)) <= 1:
+            # If the parsed source only gave a surname, jersey number is a
+            # strong enough tiebreaker when that number is unique on the team.
+            replacement = candidates[0]
+
+        if replacement and len(_name_tokens(replacement)) >= 2:
+            out.at[index, "player_name"] = replacement
+
+    return out
+
+
 def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
     team = _norm_team(team)
 
     try:
         current = _load_current_depth_chart(team)
         if not current.empty:
+            current = _enrich_full_names(current, season, team)
             current.attrs["source"] = "Current depth chart"
             return current
     except Exception as exc:
@@ -415,6 +510,7 @@ def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
         empty.attrs["fallback_error"] = fallback_error
         return empty
 
+    fallback = _enrich_full_names(fallback, season, team)
     fallback.attrs["source"] = "nflverse fallback"
     fallback.attrs["live_source_error"] = current_error
     return fallback
