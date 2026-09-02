@@ -236,6 +236,7 @@ def _load_current_depth_charts_all():
             (5, 10, 11),
         ]
 
+        added_player = False
         for rank, number_index, name_index in player_slots:
             if name_index >= len(values):
                 continue
@@ -260,6 +261,23 @@ def _load_current_depth_charts_all():
                     "rank": rank,
                     "player_name": name,
                     "number": number,
+                    "updated": pd.Timestamp.utcnow(),
+                    "source": "Current depth chart",
+                }
+            )
+            added_player = True
+
+        if not added_player:
+            rows.append(
+                {
+                    "team": team,
+                    "section": current_section,
+                    "position": position,
+                    "slot_id": slot_id,
+                    "slot_order": source_slot_order,
+                    "rank": 1,
+                    "player_name": "TBD",
+                    "number": "",
                     "updated": pd.Timestamp.utcnow(),
                     "source": "Current depth chart",
                 }
@@ -463,8 +481,15 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
 
     sections = []
 
+    if "section" in rows.columns:
+        row_groups = rows["section"].fillna(
+            rows["position"].map(_position_group)
+        )
+    else:
+        row_groups = rows["position"].map(_position_group)
+
     for group in ["OFFENSE", "DEFENSE", "SPECIAL TEAMS", "OTHER"]:
-        group_rows = rows[rows["position"].map(_position_group) == group].copy()
+        group_rows = rows[row_groups == group].copy()
         if group_rows.empty:
             continue
 
