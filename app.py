@@ -54,9 +54,10 @@ from prediction_game import (
     winner_pick_for_user,
 )
 from team_history import team_history
+from depth_chart import depth_chart_html, latest_update_label, load_depth_chart_data
 
 MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
-NFL_LOGO_URL = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+GRIDIRON_LOGO_PATH = "assets/gridiron_central_logo.svg"
 APP_DISPLAY_NAME = "Gridiron Central"
 
 
@@ -581,15 +582,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-brand_logo, brand_title = st.columns([0.09, 0.91], vertical_alignment="center")
+brand_logo, brand_title = st.columns([0.13, 0.87], vertical_alignment="center")
 with brand_logo:
-    st.image(NFL_LOGO_URL, width=72)
+    st.image(GRIDIRON_LOGO_PATH, width=118)
 with brand_title:
     st.markdown(f"# {APP_DISPLAY_NAME}")
 
 st.caption(
     "NFL forecasts, weekly prediction challenges, team intelligence, schedules, "
-    "player status, and league exploration."
+    "depth charts, player status, and league exploration."
 )
 
 
@@ -606,6 +607,11 @@ def get_model(_schedules, _team_stats, data_signature, model_cache_version):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_injuries(season):
     return load_injury_data(season)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_depth_charts(season):
+    return load_depth_chart_data(season)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -662,6 +668,7 @@ try:
             pd.to_numeric(schedules["season"], errors="coerce").dropna().max()
         )
         injuries = get_injuries(current_season)
+        depth_charts = get_depth_charts(current_season)
         challenge_roster = get_challenge_roster(current_season)
         challenge_stats = get_challenge_stats(current_season)
         active_week = current_week(schedules, current_season)
@@ -681,12 +688,13 @@ except Exception as exc:
 
 teams = available_teams(bundle)
 
-tab_home, tab_challenge, tab_predict, tab_team, tab_upcoming, tab_offseason, tab_injuries, tab_map, tab_accuracy, tab_method = st.tabs(
+tab_home, tab_challenge, tab_predict, tab_team, tab_depth, tab_upcoming, tab_offseason, tab_injuries, tab_map, tab_accuracy, tab_method = st.tabs(
     [
         "Home",
         "Weekly Challenge",
         "Matchup Predictor",
         "Team Hub",
+        "Depth Chart",
         "Upcoming Games",
         "Offseason Changes",
         "Player Status",
@@ -1254,6 +1262,46 @@ with tab_team:
                     st.caption("No departures found.")
                 else:
                     st.dataframe(top_losses, hide_index=True, use_container_width=True)
+
+
+with tab_depth:
+    st.subheader("Depth Chart")
+    st.caption(
+        "Latest available team depth chart arranged on the field. The larger name in each "
+        "position card is the projected starter; the smaller name underneath is the next "
+        "available depth option from the source."
+    )
+
+    depth_team = st.selectbox(
+        "Team",
+        teams,
+        format_func=team_label,
+        key="depth_chart_team",
+    )
+
+    depth_header_logo, depth_header_text = st.columns([0.12, 0.88], vertical_alignment="center")
+    with depth_header_logo:
+        st.image(team_logo_url(depth_team), width=92)
+    with depth_header_text:
+        st.markdown(f"## {team_name(depth_team)}")
+        updated_label = latest_update_label(depth_charts, depth_team)
+        if updated_label:
+            st.caption(f"Latest depth-chart snapshot: {updated_label}")
+        else:
+            st.caption("Latest available depth-chart snapshot")
+
+    depth_html = depth_chart_html(depth_charts, depth_team)
+    if not depth_html:
+        st.info(
+            "A current depth chart is not available from the source for this team yet. "
+            "It will populate automatically when the latest depth-chart data is published."
+        )
+    else:
+        st.markdown(depth_html, unsafe_allow_html=True)
+        st.caption(
+            "Field placement is a Gridiron Central visualization of the published depth chart. "
+            "Actual offensive and defensive formations change by package and play."
+        )
 
 
 with tab_upcoming:
