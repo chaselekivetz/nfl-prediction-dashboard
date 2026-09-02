@@ -54,7 +54,7 @@ from prediction_game import (
     winner_pick_for_user,
 )
 from team_history import team_history
-from depth_chart import depth_chart_html, latest_update_label, load_depth_chart_data
+from depth_chart import depth_chart_html, full_depth_table, latest_update_label, load_team_depth_chart
 
 MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
 GRIDIRON_LOGO_PATH = "assets/gridiron_central_logo.svg"
@@ -609,9 +609,9 @@ def get_injuries(season):
     return load_injury_data(season)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_depth_charts(season):
-    return load_depth_chart_data(season)
+@st.cache_data(ttl=600, show_spinner=False)
+def get_team_depth_chart(season, team):
+    return load_team_depth_chart(season, team)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -668,7 +668,6 @@ try:
             pd.to_numeric(schedules["season"], errors="coerce").dropna().max()
         )
         injuries = get_injuries(current_season)
-        depth_charts = get_depth_charts(current_season)
         challenge_roster = get_challenge_roster(current_season)
         challenge_stats = get_challenge_stats(current_season)
         active_week = current_week(schedules, current_season)
@@ -1279,29 +1278,41 @@ with tab_depth:
         key="depth_chart_team",
     )
 
+    with st.spinner("Loading current depth chart..."):
+        team_depth_chart = get_team_depth_chart(current_season, depth_team)
+
     depth_header_logo, depth_header_text = st.columns([0.12, 0.88], vertical_alignment="center")
     with depth_header_logo:
         st.image(team_logo_url(depth_team), width=92)
     with depth_header_text:
         st.markdown(f"## {team_name(depth_team)}")
-        updated_label = latest_update_label(depth_charts, depth_team)
+        updated_label = latest_update_label(team_depth_chart, depth_team)
         if updated_label:
-            st.caption(f"Latest depth-chart snapshot: {updated_label}")
+            st.caption(f"Current depth-chart data checked: {updated_label}")
         else:
-            st.caption("Latest available depth-chart snapshot")
+            st.caption("Current depth-chart data")
 
-    depth_html = depth_chart_html(depth_charts, depth_team)
+    depth_html = depth_chart_html(team_depth_chart, depth_team)
     if not depth_html:
         st.info(
-            "A current depth chart is not available from the source for this team yet. "
-            "It will populate automatically when the latest depth-chart data is published."
+            "A current depth chart is not available for this team right now. "
+            "The tab will retry the live source after the cache refreshes."
         )
     else:
         st.html(depth_html)
         st.caption(
-            "Field placement is a Gridiron Central visualization of the published depth chart. "
-            "Actual offensive and defensive formations change by package and play."
+            "The field shows the current listed starters and main backups. Package roles such as "
+            "nickel may add an extra displayed defensive position."
         )
+
+        with st.expander("View full depth chart"):
+            full_depth = full_depth_table(team_depth_chart)
+            st.dataframe(
+                full_depth,
+                hide_index=True,
+                use_container_width=True,
+                height=min(560, 70 + len(full_depth) * 34),
+            )
 
 
 with tab_upcoming:
