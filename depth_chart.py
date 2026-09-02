@@ -12,30 +12,41 @@ import nflreadpy as nfl
 OURLADS_DEPTH_URL = "https://www.ourlads.com/nfldepthcharts/depthcharts.aspx"
 
 TEAM_ALIASES = {
-    "GNB": "GB", "KAN": "KC", "LAR": "LA", "NWE": "NE",
+    "ARZ": "ARI", "GNB": "GB", "KAN": "KC", "LAR": "LA", "NWE": "NE",
     "NOR": "NO", "SFO": "SF", "TAM": "TB", "LVR": "LV",
     "OAK": "LV", "SDG": "LAC", "STL": "LA", "WSH": "WAS",
 }
 
 OFFENSE_ORDER = [
-    "QB", "RB", "FB", "WR", "TE",
-    "LT", "LG", "C", "RG", "RT",
+    "QB", "RB", "FB",
+    "LWR", "RWR", "SWR", "WR",
+    "TE", "LT", "LG", "C", "RG", "RT", "OT", "OG",
 ]
 
 DEFENSE_ORDER = [
-    "LDE", "DE", "NT", "DT", "RDE",
-    "LOLB", "LILB", "MLB", "RILB", "ROLB", "LB",
+    "LDE", "DE", "NT", "DT", "RDE", "ED", "EDGE",
+    "LOLB", "WLB", "LILB", "MLB", "ILB", "RILB", "SLB", "ROLB", "LB",
     "LCB", "CB", "NB", "RCB", "FS", "SS", "S",
 ]
 
 SPECIAL_ORDER = [
-    "K", "PK", "P", "PT", "LS", "H", "KR", "PR", "KO", "KOS",
+    "PT", "P", "PK", "K", "LS", "H", "KO", "KOS", "PR", "KR",
 ]
+
+EXPECTED_TEAMS = {
+    "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE",
+    "DAL", "DEN", "DET", "GB", "HOU", "IND", "JAX", "KC",
+    "LV", "LAC", "LA", "MIA", "MIN", "NE", "NO", "NYG",
+    "NYJ", "PHI", "PIT", "SF", "SEA", "TB", "TEN", "WAS",
+}
 
 POSITION_LABELS = {
     "QB": "Quarterback",
     "RB": "Running Back",
     "FB": "Fullback",
+    "LWR": "Wide Receiver",
+    "RWR": "Wide Receiver",
+    "SWR": "Wide Receiver",
     "WR": "Wide Receiver",
     "TE": "Tight End",
     "LT": "Left Tackle",
@@ -43,21 +54,28 @@ POSITION_LABELS = {
     "C": "Center",
     "RG": "Right Guard",
     "RT": "Right Tackle",
-    "LDE": "Left Defensive End",
+    "OT": "Offensive Tackle",
+    "OG": "Offensive Guard",
+    "LDE": "Defensive End",
     "DE": "Defensive End",
     "NT": "Nose Tackle",
     "DT": "Defensive Tackle",
-    "RDE": "Right Defensive End",
-    "LOLB": "Left Outside Linebacker",
-    "LILB": "Left Inside Linebacker",
+    "RDE": "Defensive End",
+    "ED": "Edge",
+    "EDGE": "Edge",
+    "LOLB": "Outside Linebacker",
+    "WLB": "Weakside Linebacker",
+    "LILB": "Inside Linebacker",
     "MLB": "Middle Linebacker",
-    "RILB": "Right Inside Linebacker",
-    "ROLB": "Right Outside Linebacker",
+    "ILB": "Inside Linebacker",
+    "RILB": "Inside Linebacker",
+    "SLB": "Strongside Linebacker",
+    "ROLB": "Outside Linebacker",
     "LB": "Linebacker",
-    "LCB": "Left Cornerback",
+    "LCB": "Cornerback",
     "CB": "Cornerback",
     "NB": "Nickel Corner",
-    "RCB": "Right Cornerback",
+    "RCB": "Cornerback",
     "FS": "Free Safety",
     "SS": "Strong Safety",
     "S": "Safety",
@@ -72,6 +90,27 @@ POSITION_LABELS = {
     "KO": "Kickoff Specialist",
     "KOS": "Kickoff Specialist",
 }
+
+
+def _display_position(position):
+    position = _clean(position).upper()
+    aliases = {
+        "LWR": "WR",
+        "RWR": "WR",
+        "SWR": "WR",
+        "LDE": "DE",
+        "RDE": "DE",
+        "LCB": "CB",
+        "RCB": "CB",
+        "LILB": "ILB",
+        "RILB": "ILB",
+        "LOLB": "OLB",
+        "ROLB": "OLB",
+        "PT": "P",
+        "PK": "K",
+    }
+    return aliases.get(position, position)
+
 
 
 def _to_pandas(frame):
@@ -120,20 +159,7 @@ def _clean_ourlads_name(value):
 
 
 def _normalize_position(value):
-    pos = _clean(value).upper()
-
-    if pos in {"HB"}:
-        return "RB"
-    if pos in {"LWR", "RWR", "SWR", "SLWR", "SRWR"}:
-        return "WR"
-    if pos in {"PK"}:
-        return "K"
-    if pos in {"PT"}:
-        return "P"
-    if pos in {"KOS"}:
-        return "KO"
-
-    return pos
+    return _clean(value).upper()
 
 
 def _http_get(url):
@@ -152,25 +178,55 @@ def _http_get(url):
     return response.text
 
 
-def _load_current_depth_chart(team):
+def _load_current_depth_charts_all():
     html = _http_get(OURLADS_DEPTH_URL)
     soup = BeautifulSoup(html, "html.parser")
+
     rows = []
+    current_section = None
+    slot_order = {}
 
     for tr in soup.find_all("tr"):
+        row_text = _clean(" ".join(tr.stripped_strings))
+        lowered = row_text.lower()
+
+        if lowered.startswith("offense -"):
+            current_section = "OFFENSE"
+            continue
+        if lowered.startswith("defense -"):
+            current_section = "DEFENSE"
+            continue
+        if lowered.startswith("special teams -"):
+            current_section = "SPECIAL TEAMS"
+            continue
+        if (
+            lowered.startswith("practice squad -")
+            or lowered.startswith("reserves -")
+        ):
+            current_section = None
+            continue
+
+        if current_section is None:
+            continue
+
+        # Only use direct table cells. Nested markup can shift depth columns.
         cells = tr.find_all(["td", "th"], recursive=False)
         if len(cells) < 4:
             continue
 
         values = [" ".join(cell.stripped_strings).strip() for cell in cells]
-        if _norm_team(values[0]) != team:
+        team = _norm_team(values[0])
+        if team not in EXPECTED_TEAMS:
             continue
 
         position = _normalize_position(values[1])
-        if not position or position in {
-            "OFF", "DEF", "ST", "PS", "RES", "IR", "NFI", "PUP"
-        }:
+        if not position or position in {"OFF", "DEF", "ST"}:
             continue
+
+        team_slot_key = (team, current_section)
+        slot_order[team_slot_key] = slot_order.get(team_slot_key, 0) + 1
+        source_slot_order = slot_order[team_slot_key]
+        slot_id = f"{current_section}:{source_slot_order}:{position}"
 
         player_slots = [
             (1, 2, 3),
@@ -197,7 +253,10 @@ def _load_current_depth_chart(team):
             rows.append(
                 {
                     "team": team,
+                    "section": current_section,
                     "position": position,
+                    "slot_id": slot_id,
+                    "slot_order": source_slot_order,
                     "rank": rank,
                     "player_name": name,
                     "number": number,
@@ -208,16 +267,32 @@ def _load_current_depth_chart(team):
 
     frame = pd.DataFrame(rows)
     if frame.empty:
-        raise RuntimeError(f"No current depth-chart rows parsed for {team}.")
+        raise RuntimeError("No current depth-chart rows were parsed.")
+
+    parsed_teams = set(frame["team"].dropna().unique())
+    if len(parsed_teams) < 32:
+        missing = sorted(EXPECTED_TEAMS - parsed_teams)
+        raise RuntimeError(
+            "Current depth-chart source was incomplete. "
+            f"Parsed {len(parsed_teams)} teams; missing: {', '.join(missing)}"
+        )
 
     return (
         frame.drop_duplicates(
-            ["team", "position", "rank", "player_name"],
+            ["team", "slot_id", "rank", "player_name"],
             keep="first",
         )
-        .sort_values(["position", "rank", "player_name"])
+        .sort_values(["team", "section", "slot_order", "rank"])
         .reset_index(drop=True)
     )
+
+
+def _load_current_depth_chart(team):
+    frame = _load_current_depth_charts_all()
+    team_rows = frame[frame["team"] == team].copy()
+    if team_rows.empty:
+        raise RuntimeError(f"No current depth-chart rows parsed for {team}.")
+    return team_rows.reset_index(drop=True)
 
 
 def _load_nflverse_fallback(season, team):
@@ -271,6 +346,18 @@ def _load_nflverse_fallback(season, team):
 
     out = out[(out["team"] == team) & out["player_name"].ne("")].copy()
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce").fillna(99)
+    out["section"] = out["position"].map(_position_group)
+    out["slot_order"] = (
+        out.groupby("section", dropna=False)["position"]
+        .transform(lambda values: pd.factorize(values)[0] + 1)
+    )
+    out["slot_id"] = (
+        out["section"].astype(str)
+        + ":"
+        + out["slot_order"].astype(str)
+        + ":"
+        + out["position"].astype(str)
+    )
 
     return (
         out.drop_duplicates(
@@ -292,29 +379,47 @@ def load_team_depth_chart(season: int, team: str) -> pd.DataFrame:
 
 
 def _position_group(position):
-    if position in OFFENSE_ORDER:
+    position = _clean(position).upper()
+    if position in set(OFFENSE_ORDER):
         return "OFFENSE"
-    if position in DEFENSE_ORDER:
+    if position in set(DEFENSE_ORDER):
         return "DEFENSE"
-    if position in SPECIAL_ORDER:
+    if position in set(SPECIAL_ORDER):
         return "SPECIAL TEAMS"
+
+    if position in {"HB", "T", "G"}:
+        return "OFFENSE"
+    if position in {"DL", "DB"}:
+        return "DEFENSE"
     return "OTHER"
 
 
-def _ordered_positions(rows, group):
-    if group == "OFFENSE":
-        preferred = OFFENSE_ORDER
-    elif group == "DEFENSE":
-        preferred = DEFENSE_ORDER
-    elif group == "SPECIAL TEAMS":
-        preferred = SPECIAL_ORDER
-    else:
-        preferred = []
+def _ordered_slots(rows, group):
+    if rows.empty:
+        return []
 
-    present = list(dict.fromkeys(rows["position"].tolist()))
-    ordered = [pos for pos in preferred if pos in present]
-    ordered.extend(sorted(pos for pos in present if pos not in ordered))
-    return ordered
+    preferred = (
+        OFFENSE_ORDER
+        if group == "OFFENSE"
+        else DEFENSE_ORDER
+        if group == "DEFENSE"
+        else SPECIAL_ORDER
+        if group == "SPECIAL TEAMS"
+        else []
+    )
+    priority = {position: index for index, position in enumerate(preferred)}
+
+    slots = (
+        rows[["slot_id", "slot_order", "position"]]
+        .drop_duplicates("slot_id")
+        .copy()
+    )
+    slots["_priority"] = slots["position"].map(
+        lambda value: priority.get(value, 999)
+    )
+    slots = slots.sort_values(["_priority", "slot_order", "position"])
+
+    return list(slots.itertuples(index=False))
 
 
 DEPTH_COLUMN_LABELS = {
@@ -364,9 +469,10 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
             continue
 
         position_rows = []
-        for position in _ordered_positions(group_rows, group):
+        for slot in _ordered_slots(group_rows, group):
+            position = _clean(slot.position).upper()
             players = (
-                group_rows[group_rows["position"] == position]
+                group_rows[group_rows["slot_id"] == slot.slot_id]
                 .sort_values(["rank", "player_name"])
             )
 
@@ -381,10 +487,11 @@ def depth_chart_html(depth_data: pd.DataFrame, team: str) -> str:
                 for rank in range(1, 6)
             )
 
+            display_position = _display_position(position)
             label = POSITION_LABELS.get(position, position)
             position_rows.append(
                 "<div class='dc-row'>"
-                f"<div class='dc-position'><strong>{escape(position)}</strong>"
+                f"<div class='dc-position'><strong>{escape(display_position)}</strong>"
                 f"<span>{escape(label)}</span></div>"
                 f"{player_cells}"
                 "</div>"
