@@ -54,7 +54,7 @@ from prediction_game import (
     winner_pick_for_user,
 )
 from team_history import team_history
-from depth_chart import depth_chart_html, full_depth_table, latest_update_label, load_team_depth_chart
+from depth_chart import depth_chart_html, latest_update_label, load_team_depth_chart
 
 MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
 GRIDIRON_LOGO_PATH = "assets/gridiron_central_logo.svg"
