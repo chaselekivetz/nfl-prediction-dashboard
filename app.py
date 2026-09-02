@@ -57,7 +57,7 @@ from team_history import team_history
 
 MODEL_CACHE_VERSION = "player-impact-role-v3-trade-audit"
 NFL_LOGO_URL = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
-APP_DISPLAY_NAME = "Gridiron Forecast"
+APP_DISPLAY_NAME = "Gridiron Central"
 
 
 TEAM_NAMES = {
