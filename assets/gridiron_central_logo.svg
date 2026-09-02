@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" role="img" aria-label="Gridiron Central logo">
+  <defs>
+    <linearGradient id="silver" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".32" stop-color="#b8c2cf"/>
+      <stop offset=".58" stop-color="#f7f9fc"/>
+      <stop offset="1" stop-color="#7f8b99"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#53c7ff"/>
+      <stop offset=".45" stop-color="#0878ff"/>
+      <stop offset="1" stop-color="#003caa"/>
+    </linearGradient>
+    <linearGradient id="navy" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#061a36"/>
+      <stop offset="1" stop-color="#010814"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="15" flood-color="#001025" flood-opacity=".8"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <circle cx="450" cy="338" r="250" fill="url(#navy)" stroke="#0c79ff" stroke-width="18"/>
+    <circle cx="450" cy="338" r="226" fill="none" stroke="url(#silver)" stroke-width="12" opacity=".9"/>
+    <g stroke="#fff" stroke-width="10" stroke-linecap="round" opacity=".88">
+      <path d="M330 126v30M390 105v34M450 98v42M510 105v34M570 126v30"/>
+      <path d="M330 520v30M390 536v34M450 542v42M510 536v34M570 520v30"/>
+    </g>
+    <path d="M175 307l-70 25 88 9-78 31 96-8" fill="none" stroke="#0b8cff" stroke-width="12" opacity=".9"/>
+    <path d="M725 307l72-18-59 40 74-3-83 34" fill="none" stroke="#13b7ff" stroke-width="12" opacity=".9"/>
+    <path d="M203 251c58-105 152-157 280-157 98 0 173 29 230 88l-89 82c-40-36-87-53-141-53-79 0-136 28-170 84-36 58-38 123-6 194 26 58 78 88 154 88 57 0 104-15 139-45l-111-1 57-112h256l-12 150c-43 70-121 123-224 143-146 29-278 2-363-88-102-108-111-268-20-393z"
+      fill="url(#silver)" stroke="#031329" stroke-width="24" stroke-linejoin="round"/>
+    <path d="M544 305h236l-73 79H584l-35 71h144l-51 139H480l69-147-83 7 58-149z"
+      fill="url(#blue)" stroke="#031329" stroke-width="22" stroke-linejoin="round"/>
+    <g transform="translate(502 383) rotate(-19)">
+      <ellipse cx="0" cy="0" rx="95" ry="59" fill="#061632" stroke="#e8f4ff" stroke-width="10"/>
+      <path d="M-65-10c37-17 90-17 130 0" fill="none" stroke="#ffffff" stroke-width="8"/>
+      <path d="M-12-25v48M10-24v47M-35-18h67" stroke="#fff" stroke-width="7" stroke-linecap="round"/>
+      <path d="M-78-23l16 10M78-23l-16 10" stroke="#19a7ff" stroke-width="7"/>
+    </g>
+    <path d="M96 638h708l-34 136H130z" fill="url(#navy)" stroke="url(#silver)" stroke-width="14"/>
+    <text x="450" y="724" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="102" font-style="italic" letter-spacing="3" fill="url(#silver)" stroke="#0b1424" stroke-width="4">GRIDIRON</text>
+    <path d="M160 789h580l-31 58H191z" fill="#031124" stroke="#1f8fff" stroke-width="5"/>
+    <text x="450" y="833" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="42" font-weight="800" letter-spacing="18" fill="#ffffff">CENTRAL</text>
+  </g>
+</svg>
