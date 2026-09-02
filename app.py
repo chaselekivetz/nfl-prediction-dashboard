@@ -419,11 +419,23 @@ def projected_margin_from_result(result, away, home):
 
 
 def matchup_projection(bundle, away, home):
+    cache = st.session_state.setdefault("_matchup_projection_cache", {})
+    cache_key = (id(bundle), str(away), str(home))
+    if cache_key in cache:
+        return cache[cache_key]
+
     try:
         result = predict_matchup(bundle, away, home)
     except Exception:
-        return None, None
-    return result, projected_margin_from_result(result, away, home)
+        projection = (None, None)
+    else:
+        projection = (
+            result,
+            projected_margin_from_result(result, away, home),
+        )
+
+    cache[cache_key] = projection
+    return projection
 
 
 def game_of_week(bundle, weekly_games):
@@ -607,6 +619,7 @@ with st.sidebar:
     if st.button("↻ Refresh NFL data", use_container_width=True):
         st.cache_data.clear()
         st.cache_resource.clear()
+        st.session_state.pop("_matchup_projection_cache", None)
         st.rerun()
 
     st.markdown(
