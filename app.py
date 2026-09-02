@@ -59,7 +59,7 @@ from depth_chart import depth_chart_html, latest_update_label, load_team_depth_c
 MODEL_CACHE_VERSION = "player-impact-role-v4-full-trade-injury-audit"
 GRIDIRON_LOGO_PATH = "assets/gridiron_central_logo.svg"
 APP_DISPLAY_NAME = "Gridiron Central"
-DEPTH_CACHE_VERSION = "depth-chart-v4-name-enrichment-fix"
+DEPTH_CACHE_VERSION = "depth-chart-v5-preserve-source-full-names"
 
 
 TEAM_NAMES = {
