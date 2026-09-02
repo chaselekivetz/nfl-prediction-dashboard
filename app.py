@@ -1277,8 +1277,11 @@ with tab_depth:
         key="depth_chart_team",
     )
 
-    with st.spinner("Loading current depth chart..."):
-        team_depth_chart = get_team_depth_chart(current_season, depth_team)
+    try:
+        with st.spinner("Loading current depth chart..."):
+            team_depth_chart = get_team_depth_chart(current_season, depth_team)
+    except Exception:
+        team_depth_chart = pd.DataFrame()
 
     depth_header_logo, depth_header_text = st.columns([0.12, 0.88], vertical_alignment="center")
     with depth_header_logo:
@@ -1294,8 +1297,8 @@ with tab_depth:
     depth_html = depth_chart_html(team_depth_chart, depth_team)
     if not depth_html:
         st.info(
-            "A current depth chart is not available for this team right now. "
-            "The tab will retry the live source after the cache refreshes."
+            "This team's depth chart is temporarily unavailable. "
+            "The app will retry the current source automatically after the cache refreshes."
         )
     else:
         st.html(depth_html)
