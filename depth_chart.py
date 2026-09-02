@@ -440,8 +440,12 @@ def _enrich_full_names(frame, season, team):
         return frame
 
     by_number = {}
-    for row in roster.itertuples():
-        by_number.setdefault(row._number, []).append(row._name)
+    for _, roster_row in roster.iterrows():
+        jersey_number = _clean(roster_row.get("_number"))
+        full_name = _clean(roster_row.get("_name"))
+        if not jersey_number or not full_name:
+            continue
+        by_number.setdefault(jersey_number, []).append(full_name)
 
     out = frame.copy()
 
