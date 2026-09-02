@@ -8,3 +8,4 @@ Authlib>=1.3.2
 requests>=2.32
 httpx>=0.28
 pydeck>=0.9
+beautifulsoup4>=4.12
