@@ -122,13 +122,20 @@ def _status_category(detail: str) -> str:
     if re.search(r"\bout\b", text):
         return "Out"
 
+    # Keep reserve-list designations distinct so roster/injury changes can be
+    # surfaced accurately instead of collapsing IR, PUP and NFI together.
+    if (
+        "injured reserve" in text
+        or "reserve/injured" in text
+        or re.search(r"\bir\b", text)
+    ):
+        return "IR"
+    if "physically unable to perform" in text or re.search(r"\bpup\b", text):
+        return "PUP"
+    if "non-football injury" in text or re.search(r"\bnfi\b", text):
+        return "NFI"
+
     unavailable_terms = [
-        "injured reserve",
-        "ir.",
-        "physically unable to perform",
-        "pup",
-        "nfi-",
-        "non-football injury",
         "suspended",
         "commissioner's exempt",
         "commissioners exempt",
@@ -330,6 +337,9 @@ def injury_status_counts(team_injuries: pd.DataFrame) -> dict:
         "Out": 0,
         "Doubtful": 0,
         "Questionable": 0,
+        "IR": 0,
+        "PUP": 0,
+        "NFI": 0,
         "Unavailable": 0,
     }
     if team_injuries.empty or "report_status" not in team_injuries.columns:
@@ -342,9 +352,18 @@ def injury_status_counts(team_injuries: pd.DataFrame) -> dict:
         .str.lower()
         .str.strip()
     )
+    ir = int((statuses == "ir").sum())
+    pup = int((statuses == "pup").sum())
+    nfi = int((statuses == "nfi").sum())
+    unavailable_other = int((statuses == "unavailable").sum())
     return {
         "Out": int((statuses == "out").sum()),
         "Doubtful": int((statuses == "doubtful").sum()),
         "Questionable": int((statuses == "questionable").sum()),
-        "Unavailable": int((statuses == "unavailable").sum()),
+        "IR": ir,
+        "PUP": pup,
+        "NFI": nfi,
+        # Preserve the legacy aggregate for model/UI code that treats all
+        # reserve-list players as unavailable.
+        "Unavailable": ir + pup + nfi + unavailable_other,
     }
