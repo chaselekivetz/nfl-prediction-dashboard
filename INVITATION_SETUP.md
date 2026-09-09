@@ -7,7 +7,7 @@ The administrator enters an email and clicks Approve & invite. Auth0 creates a d
 ## Production configuration
 
 1. In Auth0, enable an email/password Database connection for the existing Streamlit application. Disable public signups on that connection. Ensure Universal Login offers that connection rather than forcing the passwordless email connection. Preserve the administrator's existing login method while testing.
-2. Create an Auth0 Machine-to-Machine application authorized for the Management API with only `read:users`, `create:users`, and `create:user_tickets` permissions.
+2. Create an Auth0 Machine-to-Machine application authorized for the Management API with only `read:users` and `create:users` permissions.
 3. Set the Streamlit application's Auth0 Application Login URI to the dashboard URL; preserve its `/oauth2callback` allowed callback. Password setup should offer a return to that application. Set a suitable password policy on the database connection.
 4. Add the following section to private Streamlit Secrets, using actual values there only:
 
@@ -30,3 +30,4 @@ Invite a non-admin test account; verify actual email receipt, password setup, ve
 No live emails have been sent and production configuration has not been changed. Auth0 email delivery needs this live acceptance check.
 
 Reference: https://auth0.com/docs/customize/email/send-email-invitations-for-application-signup
+
