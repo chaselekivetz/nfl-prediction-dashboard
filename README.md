@@ -1,4 +1,4 @@
-# NFL Prediction Lab
+# Gridiron Central
 
 A browser-based educational NFL analytics project built with Streamlit.
 
