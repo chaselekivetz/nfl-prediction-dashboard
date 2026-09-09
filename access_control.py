@@ -6,6 +6,7 @@ import re
 
 import requests
 import streamlit as st
+from password_invites import setup_link
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -154,7 +155,7 @@ def require_access() -> AccessUser:
         st.button("Log out", on_click=st.logout)
         st.stop()
 
-    if claims.get("email_verified") is False:
+    if claims.get("email_verified") is not True:
         st.error("Your email address must be verified before this dashboard can be opened.")
         st.button("Log out", on_click=st.logout)
         st.stop()
@@ -238,7 +239,11 @@ def _send_invite_email(email: str, invited_by: str) -> tuple[bool, str]:
 
     safe_email = html.escape(email)
     safe_inviter = html.escape(invited_by)
-    safe_url = html.escape(app_url, quote=True)
+    cfg = _section("invite_auth0")
+    if not all(cfg.get(k) for k in ("domain", "client_id", "client_secret", "connection")):
+        return False, "Access approved, but password invitation settings are missing."
+    ticket = setup_link(email, cfg, _section("auth")["client_id"])
+    safe_url = html.escape(ticket, quote=True)
 
     response = requests.post(
         "https://api.resend.com/emails",
@@ -253,8 +258,10 @@ def _send_invite_email(email: str, invited_by: str) -> tuple[bool, str]:
             "html": (
                 "<h2>You're invited to NFL Prediction Lab</h2>"
                 f"<p>{safe_inviter} approved {safe_email} for private access.</p>"
-                f'<p><a href="{safe_url}">Open NFL Prediction Lab</a></p>'
-                "<p>Sign in with the same email address that received this invitation.</p>"
+                f'<p><a href="{safe_url}">Set your password</a></p>'
+                "<p>This link expires in 24 hours. After setting your password, "
+                f'<a href="{html.escape(app_url, quote=True)}">open the dashboard</a> '
+                "and sign in with this email address.</p>"
             ),
             "tags": [{"name": "category", "value": "nfl_dashboard_invite"}],
         },
@@ -272,12 +279,22 @@ def invite_system_status() -> dict:
             str(access.get("resend_api_key", "")).strip()
             and str(access.get("from_email", "")).strip()
             and str(access.get("app_url", "")).strip()
+            and all(_section("invite_auth0").get(k) for k in ("domain", "client_id", "client_secret", "connection"))
         ),
         "app_url": str(access.get("app_url", "")).strip(),
     }
 
 
+def _require_admin() -> str:
+    claims = st.user.to_dict() if st.user.is_logged_in else {}
+    email = _normalise_email(claims.get("email", ""))
+    if claims.get("email_verified") is not True or email not in _admin_emails():
+        raise ValueError("Administrator access is required.")
+    return email
+
+
 def invite_user(email: str, invited_by: str) -> dict:
+    invited_by = _require_admin()
     email = _validate_email(email)
     if email in _admin_emails():
         return {
@@ -288,7 +305,10 @@ def invite_user(email: str, invited_by: str) -> dict:
         }
 
     _approve_user(email, invited_by)
-    sent, message = _send_invite_email(email, invited_by)
+    try:
+        sent, message = _send_invite_email(email, invited_by)
+    except (requests.RequestException, ValueError, KeyError):
+        sent, message = False, "Access approved, but the setup email failed. Check invitation settings and retry."
     return {
         "email": email,
         "approved": True,
@@ -302,16 +322,20 @@ def list_invited_users() -> list[dict]:
 
 
 def revoke_invited_user(email: str) -> None:
+    _require_admin()
     email = _validate_email(email)
     if email in _admin_emails():
         raise ValueError("Administrator access cannot be revoked here.")
+    if email in _static_approved_emails():
+        raise ValueError("Remove this email from access.approved_emails in Streamlit Secrets first.")
     _revoke_user(email)
 
 
 def render_invite_page(user: AccessUser) -> None:
+    _require_admin()
     st.title("👥 Invite Friend")
     st.caption(
-        "Approve a friend's sign-in email and optionally email them the private website link."
+        "Approve an email and send a password setup link. Revoke or restore access below."
     )
 
     status = invite_system_status()
@@ -325,7 +349,7 @@ def render_invite_page(user: AccessUser) -> None:
         return
 
     if status["email_delivery"]:
-        st.success("Access approval and invite-email delivery are ready.")
+        st.success("Invitation settings are present; delivery still needs verification.")
     else:
         st.warning(
             "Access approval is ready, but automatic invite emails are not configured. "
@@ -359,7 +383,7 @@ def render_invite_page(user: AccessUser) -> None:
         except (ValueError, RuntimeError) as exc:
             st.error(str(exc))
         except requests.RequestException as exc:
-            st.error(f"The invite could not be completed: {exc}")
+            st.error("The invite could not be completed. Check the access database configuration.")
 
     st.markdown("### Approved users")
     try:
@@ -372,6 +396,17 @@ def render_invite_page(user: AccessUser) -> None:
         st.info("No invited users yet.")
         return
 
+    inactive = sorted(u["email"] for u in users if not u.get("active"))
+    if inactive:
+        with st.form("restore_access"):
+            restore_email = st.selectbox("Restore access", inactive)
+            restore = st.form_submit_button("Restore selected user")
+        if restore:
+            try:
+                _approve_user(_validate_email(restore_email), _require_admin())
+                st.rerun()
+            except (ValueError, RuntimeError, requests.RequestException):
+                st.error("Could not restore access. Try again.")
     active_users = [u for u in users if bool(u.get("active"))]
     st.dataframe(
         [
@@ -411,96 +446,6 @@ def render_invite_page(user: AccessUser) -> None:
                 st.rerun()
             except (ValueError, RuntimeError, requests.RequestException) as exc:
                 st.error(f"Could not revoke access: {exc}")
-
-
-def _render_admin_panel(user: AccessUser) -> None:
-    with st.expander("Admin access", expanded=False):
-        st.caption("Approve an email, send its invitation, or revoke an existing user.")
-
-        if not _database_is_configured():
-            st.warning(
-                "Persistent invites are not configured yet. Add the Supabase settings "
-                "from README.md to Streamlit Secrets."
-            )
-            return
-
-        with st.form("invite_user_form", clear_on_submit=True):
-            invite_email = st.text_input(
-                "Invite email",
-                placeholder="person@example.com",
-                autocomplete="email",
-            )
-            invite_submitted = st.form_submit_button(
-                "Approve & send invite",
-                type="primary",
-                use_container_width=True,
-            )
-
-        if invite_submitted:
-            try:
-                email = _validate_email(invite_email)
-                if email in _admin_emails():
-                    st.info("That email is already an administrator.")
-                else:
-                    _approve_user(email, user.email)
-                    sent, message = _send_invite_email(email, user.email)
-                    if sent:
-                        st.success(f"{email} was approved. {message}")
-                    else:
-                        st.warning(f"{email} was approved. {message}")
-                        app_url = str(_access_config().get("app_url", "")).strip()
-                        if app_url:
-                            st.code(app_url, language=None)
-            except (ValueError, RuntimeError) as exc:
-                st.error(str(exc))
-            except requests.RequestException as exc:
-                st.error(f"The invite could not be completed: {exc}")
-
-        try:
-            users = _list_users()
-        except requests.RequestException as exc:
-            st.error(f"Could not load the access list: {exc}")
-            users = []
-
-        if users:
-            active_users = [u for u in users if bool(u.get("active"))]
-            st.caption(f"{len(active_users)} active invited user(s)")
-            st.dataframe(
-                [
-                    {
-                        "Email": u.get("email", ""),
-                        "Active": bool(u.get("active")),
-                        "Invited by": u.get("invited_by", ""),
-                        "Invited at": u.get("invited_at", ""),
-                    }
-                    for u in users
-                ],
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            revokable = sorted(
-                {
-                    _normalise_email(u.get("email", ""))
-                    for u in active_users
-                    if _normalise_email(u.get("email", ""))
-                    and _normalise_email(u.get("email", "")) not in _admin_emails()
-                }
-            )
-            if revokable:
-                with st.form("revoke_user_form"):
-                    revoke_email = st.selectbox("Revoke access", revokable)
-                    revoke_submitted = st.form_submit_button(
-                        "Revoke selected user",
-                        use_container_width=True,
-                    )
-                if revoke_submitted:
-                    try:
-                        _revoke_user(revoke_email)
-                        st.success(f"Access revoked for {revoke_email}.")
-                        st.rerun()
-                    except (RuntimeError, requests.RequestException) as exc:
-                        st.error(f"Could not revoke access: {exc}")
 
 
 def render_access_sidebar(user: AccessUser) -> str | None:
