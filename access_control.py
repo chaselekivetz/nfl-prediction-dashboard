@@ -128,7 +128,7 @@ def _is_approved(email: str) -> bool:
 def require_access() -> AccessUser:
     """Stop the app before loading NFL data unless the signed-in user is approved."""
     if not _auth_is_configured():
-        st.title("🔒 NFL Prediction Lab")
+        st.title("🔒 Gridiron Central")
         st.error("Private access is not configured yet.")
         st.info(
             "The dashboard is intentionally locked until OIDC authentication is configured "
@@ -137,7 +137,7 @@ def require_access() -> AccessUser:
         st.stop()
 
     if not st.user.is_logged_in:
-        st.title("🔒 NFL Prediction Lab")
+        st.title("🔒 Gridiron Central")
         st.write("This dashboard is private. Sign in with an approved account to continue.")
         st.button("Sign in", type="primary", on_click=st.login)
         st.stop()
@@ -160,7 +160,7 @@ def require_access() -> AccessUser:
         st.stop()
 
     if not _is_approved(email):
-        st.title("🔒 NFL Prediction Lab")
+        st.title("🔒 Gridiron Central")
         st.warning("This account has not been invited to the dashboard.")
         st.caption(email)
         st.button("Use a different account", on_click=st.logout)
