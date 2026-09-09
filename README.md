@@ -77,7 +77,7 @@ The access layer uses:
 
 - **OpenID Connect** through Streamlit `st.login()` to identify the user. Auth0 email sign-in is recommended for the administrator account.
 - **Supabase** for the persistent invite/allowlist table.
-- **Resend** for invitation emails.
+- **Auth0’s configured email provider** for invitation emails.
 - **Streamlit Secrets** for every credential. Do not commit real secrets to GitHub.
 
 ### 1. Create the allowlist table
@@ -88,7 +88,7 @@ The table has no public RLS policies. The app uses a Supabase server-side Secret
 
 ### 2. Configure Auth0 email sign-in
 
-Create an Auth0 application and configure email passwordless sign-in (one-time code or magic link). Add this callback URL:
+Create an Auth0 application and configure the email/password Database connection for sign-in. Add this callback URL:
 
 ```
 https://YOUR-APP.streamlit.app/oauth2callback
@@ -110,25 +110,19 @@ Open the deployed app's **Settings → Secrets** and copy the structure from:
 
 Replace every placeholder with the real value. The email in `admin_emails` is the administrator account that can always enter the app and manage invitations.
 
-Generate a long random `cookie_secret`. Keep the Auth0 client secret, Supabase Secret key, and Resend API key only in Streamlit Secrets.
+Generate a long random `cookie_secret`. Keep the Auth0 client secrets and Supabase Secret key only in Streamlit Secrets.
 
 ### 4. Configure invitation email
 
-Create a Resend sending API key and verified sender/domain, then fill in:
-
-- `resend_api_key`
-- `from_email`
-- `app_url`
-
-If Resend is not configured yet, the admin can still approve an email; the app will show the URL so it can be shared manually.
+Create an Auth0 Machine-to-Machine application authorized for `read:users` and `create:users`. Add its credentials in an `[invite_auth0]` section in Streamlit Secrets. The app creates the invited user when needed and asks Auth0 to send its Change Password email. Configure Auth0’s tenant email provider and customize the Change Password template for Gridiron Central.
 
 ### 5. Invite users
 
 After signing in as an administrator, open **Admin access** in the sidebar.
 
-Enter an email and click **Approve & send invite**. The user is written to the persistent allowlist and receives the dashboard link. They must sign in with the same approved email.
+Enter an email and click **Approve & send invite**. The user is written to the persistent allowlist and receives Auth0’s password setup email. They must sign in with the same approved email.
 
-The administrator can also revoke an invited user from the same panel.
+The administrator can also revoke or restore an invited user from the same panel.
 
 ### Security behavior
 
