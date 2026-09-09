@@ -1,9 +1,9 @@
-"""Auth0-managed password setup; ticket URLs must only be sent to their owner."""
+"""Auth0-managed password invitations using the tenant email provider."""
 import secrets
 import requests
 
 
-def setup_link(email, config, login_client_id):
+def send_password_invite(email, config, login_client_id):
     domain = config['domain'].strip()
     if any(c in domain for c in '/:@?#') or not domain:
         raise ValueError('Use an Auth0 tenant hostname.')
@@ -31,9 +31,11 @@ def setup_link(email, config, login_client_id):
         }, timeout=10)
         response.raise_for_status()
         user_id = response.json()['user_id']
-    response = requests.post(base + '/api/v2/tickets/password-change', headers=headers, json={
-        'user_id': user_id, 'client_id': login_client_id, 'ttl_sec': 86400,
-        'mark_email_as_verified': True, 'includeEmailInRedirect': False,
+    # Auth0 sends its configured Change Password email and marks the email
+    # verified after the recipient completes the password setup flow.
+    response = requests.post(base + '/dbconnections/change_password', json={
+        'client_id': login_client_id, 'email': email,
+        'connection': config['connection'],
     }, timeout=10)
     response.raise_for_status()
-    return response.json()['ticket']
+    return True

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import html
 import re
 
 import requests
 import streamlit as st
-from password_invites import setup_link
+from password_invites import send_password_invite
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -230,57 +229,19 @@ def _list_users() -> list[dict]:
 
 def _send_invite_email(email: str, invited_by: str) -> tuple[bool, str]:
     access = _access_config()
-    api_key = str(access.get("resend_api_key", "")).strip()
-    from_email = str(access.get("from_email", "")).strip()
     app_url = str(access.get("app_url", "")).strip()
-
-    if not api_key or not from_email or not app_url:
-        return False, "Access was approved, but invite-email delivery is not configured yet."
-
-    safe_email = html.escape(email)
-    safe_inviter = html.escape(invited_by)
     cfg = _section("invite_auth0")
     if not all(cfg.get(k) for k in ("domain", "client_id", "client_secret", "connection")):
         return False, "Access approved, but password invitation settings are missing."
-    ticket = setup_link(email, cfg, _section("auth")["client_id"])
-    safe_url = html.escape(ticket, quote=True)
-
-    response = requests.post(
-        "https://api.resend.com/emails",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "from": from_email,
-            "to": [email],
-            "subject": "You're invited to NFL Prediction Lab",
-            "html": (
-                "<h2>You're invited to NFL Prediction Lab</h2>"
-                f"<p>{safe_inviter} approved {safe_email} for private access.</p>"
-                f'<p><a href="{safe_url}">Set your password</a></p>'
-                "<p>This link expires in 24 hours. After setting your password, "
-                f'<a href="{html.escape(app_url, quote=True)}">open the dashboard</a> '
-                "and sign in with this email address.</p>"
-            ),
-            "tags": [{"name": "category", "value": "nfl_dashboard_invite"}],
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    return True, "Invite email sent."
+    send_password_invite(email, cfg, _section("auth")["client_id"])
+    return True, "Auth0 sent the password setup email."
 
 
 def invite_system_status() -> dict:
     access = _access_config()
     return {
         "persistent_storage": _database_is_configured(),
-        "email_delivery": bool(
-            str(access.get("resend_api_key", "")).strip()
-            and str(access.get("from_email", "")).strip()
-            and str(access.get("app_url", "")).strip()
-            and all(_section("invite_auth0").get(k) for k in ("domain", "client_id", "client_secret", "connection"))
-        ),
+        "email_delivery": all(_section("invite_auth0").get(k) for k in ("domain", "client_id", "client_secret", "connection")),
         "app_url": str(access.get("app_url", "")).strip(),
     }
 
@@ -352,8 +313,7 @@ def render_invite_page(user: AccessUser) -> None:
         st.success("Invitation settings are present; delivery still needs verification.")
     else:
         st.warning(
-            "Access approval is ready, but automatic invite emails are not configured. "
-            "You can still approve a friend and copy the website link for them."
+        "Access approval is ready, but Auth0 email invitations are not configured yet."
         )
 
     with st.form("invite_friend_page_form", clear_on_submit=True):

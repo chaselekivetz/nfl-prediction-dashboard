@@ -2,7 +2,7 @@
 
 Password invitation setup for the Gridiron Central dashboard.
 
-The administrator enters an email and clicks Approve & invite. Auth0 creates a database account when needed; Resend sends a 24-hour password setup ticket. Only consuming that ticket verifies the email. Existing accounts retain their password until they use the ticket. Users remain accepted until revoked; Restore access reactivates a revoked user without resetting their password.
+The administrator enters an email and clicks Approve & invite. Auth0 creates a database account when needed and sends its Change Password email. The recipient chooses a password, and Auth0 verifies the email after that flow. Existing accounts retain their password until they use the invitation. Users remain accepted until revoked; Restore access reactivates a revoked user without resetting their password.
 
 ## Production configuration
 
@@ -19,13 +19,14 @@ client_secret = "YOUR-MACHINE-TO-MACHINE-SECRET"
 connection = "Username-Password-Authentication"
 ```
 
-5. Keep the existing `[auth]` login client and `[access]` Supabase/Resend configuration. Resend needs a verified sender, and `access.app_url` must be the production dashboard URL.
-6. Keep ordinary members out of `access.approved_emails`: that legacy static list bypasses database approval. The UI refuses to claim revocation succeeded for a static member. Administrator accounts remain protected.
+5. Keep the existing `[auth]` login client and `[access]` Supabase configuration. `access.app_url` is optional and only used as a manual fallback display.
+6. In Auth0, configure the tenant email provider and customize the **Change Password** template so the message clearly says it is a Gridiron Central invitation. Auth0’s development email provider may be limited; use SMTP for reliable production delivery.
+7. Keep ordinary members out of `access.approved_emails`: that legacy static list bypasses database approval. The UI refuses to claim revocation succeeded for a static member. Administrator accounts remain protected.
 
 ## Acceptance check before rollout
 
 Invite a non-admin test account; verify actual email receipt, password setup, verified email claim, and login. Check repeat invitation, expired ticket, wrong/unverified email, denied unapproved account, revoke while logged in, restoration, database outage, and email-provider failure. Revocation is checked on subsequent Streamlit reruns; an already rendered page cannot be recalled. An invitation ticket cannot bypass revoked database access. Email failures retain approval and allow an administrator to retry.
 
-No live emails have been sent and production configuration has not been changed. Auth0 and Resend integration needs this live acceptance check.
+No live emails have been sent and production configuration has not been changed. Auth0 email delivery needs this live acceptance check.
 
 Reference: https://auth0.com/docs/customize/email/send-email-invitations-for-application-signup
