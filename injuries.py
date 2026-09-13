@@ -156,6 +156,169 @@ def _parse_updated(value: str, season: int):
     return parsed
 
 
+def _name_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9 ]+", "", text)
+    parts = [p for p in text.split() if p not in {"jr", "sr", "ii", "iii", "iv", "v"}]
+    return " ".join(parts)
+
+
+def _roster_reserve_category(row: pd.Series) -> str | None:
+    status = str(row.get("status", "") or "").strip().upper()
+    detail_fields = [
+        row.get("status_description_abbr", ""),
+        row.get("status_description", ""),
+        row.get("status", ""),
+    ]
+    detail = " ".join(str(v or "") for v in detail_fields).strip().lower()
+
+    if status == "PUP" or re.search(r"\bpup\b", detail):
+        return "PUP"
+    if status == "RSN" or "non-football" in detail or re.search(r"\bnfi\b", detail):
+        return "NFI"
+    if (
+        status == "RES"
+        and (
+            "injured reserve" in detail
+            or "reserve/injured" in detail
+            or re.search(r"\bir\b", detail)
+        )
+    ):
+        return "IR"
+    return None
+
+
+def _load_current_roster_statuses(season: int) -> pd.DataFrame:
+    try:
+        roster = _to_pandas(nfl.load_rosters([int(season)]))
+    except Exception:
+        return pd.DataFrame()
+
+    if roster.empty or "team" not in roster.columns or "full_name" not in roster.columns:
+        return pd.DataFrame()
+
+    roster = roster.copy()
+    roster["team"] = roster["team"].map(_norm_team)
+    roster["full_name"] = roster["full_name"].fillna("").astype(str).str.strip()
+    roster["_name_key"] = roster["full_name"].map(_name_key)
+    roster["_reserve_status"] = roster.apply(_roster_reserve_category, axis=1)
+
+    if "week" in roster.columns:
+        roster["week"] = pd.to_numeric(roster["week"], errors="coerce")
+        roster = roster.sort_values("week", ascending=False, na_position="last")
+
+    roster = roster.drop_duplicates(["team", "_name_key"], keep="first")
+    return roster.reset_index(drop=True)
+
+
+def _reconcile_roster_reserve_statuses(
+    injuries: pd.DataFrame,
+    season: int,
+) -> pd.DataFrame:
+    """Use current roster status as source of truth for IR/PUP/NFI.
+
+    CBS is better for same-week Out/Doubtful/Questionable designations, but its
+    injury page can briefly lag Saturday roster moves. nflverse roster data is
+    updated daily and explicitly tracks reserve-list status. Reconcile only
+    reserve statuses so normal game-status reporting remains sourced from CBS.
+    """
+    roster = _load_current_roster_statuses(season)
+    if roster.empty:
+        return injuries
+
+    frame = injuries.copy()
+    if frame.empty:
+        frame = pd.DataFrame(
+            columns=[
+                "team",
+                "full_name",
+                "position",
+                "report_primary_injury",
+                "report_secondary_injury",
+                "report_status",
+                "practice_status",
+                "status_detail",
+                "date_modified",
+                "source",
+            ]
+        )
+
+    frame["_name_key"] = frame.get("full_name", pd.Series("", index=frame.index)).map(_name_key)
+    frame["team"] = frame.get("team", pd.Series("", index=frame.index)).map(_norm_team)
+
+    current_keys = {
+        (str(row.team), str(row._name_key)): row
+        for row in roster.itertuples(index=False)
+        if str(getattr(row, "_name_key", ""))
+    }
+
+    # Remove stale CBS reserve rows when the current roster no longer has that
+    # player on IR/PUP/NFI. Keep ordinary game-status rows from CBS untouched.
+    if "report_status" in frame.columns:
+        reserve_mask = frame["report_status"].fillna("").isin(["IR", "PUP", "NFI"])
+        stale_mask = []
+        for idx, row in frame.iterrows():
+            if not bool(reserve_mask.loc[idx]):
+                stale_mask.append(False)
+                continue
+            roster_row = current_keys.get((str(row.get("team", "")), str(row.get("_name_key", ""))))
+            stale_mask.append(
+                roster_row is not None
+                and getattr(roster_row, "_reserve_status", None) is None
+            )
+        if stale_mask:
+            frame = frame.loc[~pd.Series(stale_mask, index=frame.index)].copy()
+
+    synthetic = []
+    now = pd.Timestamp.now(tz="UTC")
+    for row in roster.itertuples(index=False):
+        reserve_status = getattr(row, "_reserve_status", None)
+        if reserve_status not in {"IR", "PUP", "NFI"}:
+            continue
+
+        team = str(getattr(row, "team", "") or "")
+        name = str(getattr(row, "full_name", "") or "").strip()
+        name_key = str(getattr(row, "_name_key", "") or "")
+        if not team or not name or not name_key:
+            continue
+
+        # Roster reserve designation overrides any stale CBS status for the
+        # same player because IR/PUP/NFI are official roster states.
+        frame = frame[
+            ~(
+                (frame["team"] == team)
+                & (frame["_name_key"] == name_key)
+            )
+        ].copy()
+
+        description = str(getattr(row, "status_description_abbr", "") or "").strip()
+        raw_status = str(getattr(row, "status", "") or "").strip()
+        detail = description or raw_status or reserve_status
+        synthetic.append(
+            {
+                "team": team,
+                "full_name": name,
+                "position": str(getattr(row, "position", "") or ""),
+                "report_primary_injury": "",
+                "report_secondary_injury": "",
+                "report_status": reserve_status,
+                "practice_status": "",
+                "status_detail": f"Current roster status: {detail}",
+                "date_modified": now,
+                "source": "nflverse roster",
+                "_name_key": name_key,
+            }
+        )
+
+    if synthetic:
+        frame = pd.concat([frame, pd.DataFrame(synthetic)], ignore_index=True, sort=False)
+
+    frame = frame.drop(columns=["_name_key"], errors="ignore")
+    frame.attrs.update(injuries.attrs)
+    frame.attrs["reserve_status_source"] = "nflverse current roster"
+    return frame.reset_index(drop=True)
+
+
 def _load_live_cbs_injuries(season: int) -> pd.DataFrame:
     response = requests.get(
         CBS_INJURY_URL,
@@ -277,9 +440,11 @@ def _load_nflverse_injuries(season: int) -> pd.DataFrame:
 
 def load_injury_data(season: int) -> pd.DataFrame:
     try:
-        return _load_live_cbs_injuries(int(season))
+        live = _load_live_cbs_injuries(int(season))
+        return _reconcile_roster_reserve_statuses(live, int(season))
     except Exception as live_error:
         fallback = _load_nflverse_injuries(int(season))
+        fallback = _reconcile_roster_reserve_statuses(fallback, int(season))
         fallback.attrs["live_source_error"] = str(live_error)
         return fallback
 
