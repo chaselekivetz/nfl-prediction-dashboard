@@ -246,10 +246,11 @@ def _reconcile_roster_reserve_statuses(
     frame["_name_key"] = frame.get("full_name", pd.Series("", index=frame.index)).map(_name_key)
     frame["team"] = frame.get("team", pd.Series("", index=frame.index)).map(_norm_team)
 
+    roster_records = roster.to_dict("records")
     current_keys = {
-        (str(row.team), str(row._name_key)): row
-        for row in roster.itertuples(index=False)
-        if str(getattr(row, "_name_key", ""))
+        (str(row.get("team", "")), str(row.get("_name_key", ""))): row
+        for row in roster_records
+        if str(row.get("_name_key", ""))
     }
 
     # Remove stale CBS reserve rows when the current roster no longer has that
@@ -264,21 +265,21 @@ def _reconcile_roster_reserve_statuses(
             roster_row = current_keys.get((str(row.get("team", "")), str(row.get("_name_key", ""))))
             stale_mask.append(
                 roster_row is not None
-                and getattr(roster_row, "_reserve_status", None) is None
+                and roster_row.get("_reserve_status") is None
             )
         if stale_mask:
             frame = frame.loc[~pd.Series(stale_mask, index=frame.index)].copy()
 
     synthetic = []
     now = pd.Timestamp.now(tz="UTC")
-    for row in roster.itertuples(index=False):
-        reserve_status = getattr(row, "_reserve_status", None)
+    for row in roster_records:
+        reserve_status = row.get("_reserve_status")
         if reserve_status not in {"IR", "PUP", "NFI"}:
             continue
 
-        team = str(getattr(row, "team", "") or "")
-        name = str(getattr(row, "full_name", "") or "").strip()
-        name_key = str(getattr(row, "_name_key", "") or "")
+        team = str(row.get("team", "") or "")
+        name = str(row.get("full_name", "") or "").strip()
+        name_key = str(row.get("_name_key", "") or "")
         if not team or not name or not name_key:
             continue
 
@@ -291,14 +292,14 @@ def _reconcile_roster_reserve_statuses(
             )
         ].copy()
 
-        description = str(getattr(row, "status_description_abbr", "") or "").strip()
-        raw_status = str(getattr(row, "status", "") or "").strip()
+        description = str(row.get("status_description_abbr", "") or "").strip()
+        raw_status = str(row.get("status", "") or "").strip()
         detail = description or raw_status or reserve_status
         synthetic.append(
             {
                 "team": team,
                 "full_name": name,
-                "position": str(getattr(row, "position", "") or ""),
+                "position": str(row.get("position", "") or ""),
                 "report_primary_injury": "",
                 "report_secondary_injury": "",
                 "report_status": reserve_status,
